@@ -18,6 +18,13 @@ git show v1.2.2:src/passthm.rs
 
 No `MobileDevice.dll`, `AirTrafficHost.dll`, framework, or Apple private library is loaded, bundled, modified, or reverse engineered. Linux native libraries are dynamically linked; their upstream LGPL licenses apply to those system components.
 
+The subsequent native handshake references public wire behavior in
+[shinkuan/AirCard-Linux](https://github.com/shinkuan/AirCard-Linux/blob/7686fd21e3e598d2217c5e6da88229cd1bca4e07/crates/aircard-core/src/services/atc.rs)
+(MIT). The client is independently implemented with strict session/order validation,
+resource bounds and terminal rejection handling. The complete pinned source record,
+including inspected but unused Grappa wrappers, is in [READY-FOR-SYNC.md](READY-FOR-SYNC.md).
+No static authentication-token data or private-library helper is copied or executed.
+
 ## Adapter choice
 
 The old [libimobiledevice-sys](https://github.com/aspenluxxxy/libimobiledevice-rs) binding uses an older bindgen toolchain; [rusty_libimobiledevice](https://github.com/jkcoxson/rusty_libimobiledevice) points users to a separate pure-Rust replacement. For this bounded PoC we need explicit existing-pair session control, extended transport enumeration, TLS error propagation, and small ownership scope. A header-compiled C adapter with a safe Rust RAII wrapper was selected rather than importing either complete stack. This is a project-specific maintenance decision, not a claim that other bindings are unusable.

@@ -4,7 +4,9 @@
 already paired iPhone. This implementation never initiates pairing or bypasses trust.
 
 On one **iOS 27.0** device, USB enumeration, existing-pair lockdownd sessions, TLS syslog,
-AFC list/write/read/cleanup, and receive-only ATC `SyncAllowed` were observed.
+AFC list/write/read/cleanup, and incoming ATC `SyncAllowed` were observed.
+The native HostInfo/RequestingSync handshake is implemented behind `--apply`, but the
+test phone returns `SyncFailed / ErrorCode=4`; **ReadyForSync is not hardware-verified**.
 Wi-Fi routing is implemented for network entries supplied by usbmuxd, but **Wi-Fi has
 not passed hardware acceptance** on this host. No full sync, Wallet/passcode modification,
 Books backup/restore, GUI, AppImage or Flatpak is implemented.
@@ -54,6 +56,8 @@ cargo run -p cli -- syslog --transport usb --duration 30
 cargo run -p cli -- scan --transport usb --duration 30
 cargo run -p cli -- snapshot --transport usb
 cargo run -p cli -- atc-smoke --transport usb --timeout 5
+cargo run -p cli -- atc-ready --transport usb             # plan only, no device access
+cargo run -p cli -- atc-ready --transport usb --timeout 10 --apply  # handshake only
 cargo run -p cli -- afc-list --transport usb
 cargo run -p cli -- afc-self-test --transport usb          # dry-run
 cargo run -p cli -- afc-self-test --transport usb --apply  # controlled write/read/delete
@@ -65,6 +69,7 @@ cargo run -p cli -- probe --transport wifi
 - `scan` ports the upstream Wallet keyword/base64/entropy/dummy-hash filters. `--show-hashes` explicitly reveals matched hashes locally. Real Wallet card detection is still unverified: observed syslog sessions had no matching card events.
 - `snapshot` emits **diagnostic metadata only**, not a complete or restorable Books snapshot. State-changing synchronization is gated on a future real backup/restore implementation.
 - `atc-smoke` starts `com.apple.atc` and honors the TLS requirement, then receives only. The report distinguishes a validated incoming `SyncAllowed` envelope from a full protocol handshake. Exit 0 means the stage-2 receive-only target passed; it does not mean `ReadyForSync` or synchronization succeeded. Exit 3 means ATC startup or first-message validation failed. Other failures use exit 1, argument errors 2, watchdog 124, cancellation 130.
+- `atc-ready` prints a dry-run plan without accessing the device. `--apply` opens the normal paired/TLS service, sends HostInfo and RequestingSync(Book), handles Ping/Pong, and closes on an exact ReadyForSync/session 1 or failure. No metadata or assets are sent. It never suppresses SyncFailed. The current test device rejects session 1 with error 4; an unmet Grappa requirement is suspected, not proven as the definition of that code. See [handshake research and evidence](docs/READY-FOR-SYNC.md). Applied success exits 0, protocol rejection 3, pre-service selection/pairing errors 1, cancellation 130.
 - `afc-read <relative-path>` reads at most 1 MiB and reports only its length. Paths reject traversal, drive prefixes, control characters and symlink components. AFC operations remain inside the normal media service scope.
 - `afc-self-test --apply` creates a unique `AirCard-Linux-PoC-*` directory, writes a 26-byte synthetic file, verifies it, and removes both. It refuses existing targets. No other CLI command writes device files. Cleanup errors are retained alongside the original error. A disconnect or forced termination can prevent remote cleanup; the emitted scratch path identifies exactly what must be removed after reconnection, through a normal AFC client. Do not delete unrelated directories. No rollback or recovery claim is made for AirTraffic sync.
 
@@ -86,11 +91,13 @@ rm /tmp/aircard-check.json /tmp/aircard-write-check.json
 | 1: Linux USB | Real iOS 27.0 device verified; syslog counters retained as sanitized evidence |
 | 1: Wi-Fi | Strict route selection implemented; no discovered network entry; acceptance incomplete |
 | 2: ATC | Service/TLS and incoming little-endian binary plist `SyncAllowed` verified on USB |
-| 3: single-asset sync | Blocked: outbound envelope and `ReadyForSync` not validated |
+| ReadyForSync handshake | Native client and mock tests implemented; real USB returns SyncFailed/code 4 |
+| 3: single-asset sync | Blocked: actual ReadyForSync not reached; Grappa interoperability unresolved |
 | 4: assets and full snapshots | Deferred behind the protocol gate; original pure Rust sources remain in reference history |
 | 5: GUI/distribution | Not started |
 
-See [the protocol research report](docs/AIRTRAFFIC-RESEARCH.md) and
+See [the original passive report](docs/AIRTRAFFIC-RESEARCH.md),
+[the current handshake report](docs/READY-FOR-SYNC.md), and
 sanitized hardware evidence (local-only report).
 The upstream customization mechanism depends on escaping the expected asset directory.
 This PoC preserves the requested path-validation/security boundary; it does not expose

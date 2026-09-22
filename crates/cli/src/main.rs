@@ -1,7 +1,10 @@
 #![forbid(unsafe_code)]
 use airtraffic::{AirTrafficClient, PassiveClient, ReceiveTransport};
 use clap::{Parser, Subcommand, ValueEnum};
-use device::{AfcAccess, DeviceProvider, LinuxDeviceProvider, ServiceTransport, Transport};
+use device::{
+    AfcAccess, DeviceProvider, DuplexServiceTransport, LinuxDeviceProvider, ServiceTransport,
+    Transport,
+};
 use serde_json::json;
 use std::{
     io::{self, Write},
@@ -30,7 +33,7 @@ impl From<Route> for Transport {
 #[command(
     name = "aircard",
     version,
-    about = "Experimental Linux-only paired-device PoC. No AirTraffic writes."
+    about = "Experimental paired-device Linux PoC. ATC handshake requires --apply; no asset sync."
 )]
 struct Args {
     #[arg(long, global = true)]
@@ -70,6 +73,12 @@ enum Command {
     Snapshot,
     /// Start com.apple.atc, receive only, report lengths and unknown framing. Exit 3 if unvalidated.
     AtcSmoke,
+    /// Attempt HostInfo/RequestingSync and stop at ReadyForSync. No metadata or asset transfer.
+    AtcReady {
+        /// Required to open a device sync session; otherwise only show the plan.
+        #[arg(long)]
+        apply: bool,
+    },
     /// List AFC entries. Only count is printed by default.
     AfcList {
         #[arg(default_value = ".")]
@@ -102,6 +111,11 @@ struct Bridge<T>(T);
 impl<T: ServiceTransport> ReceiveTransport for Bridge<T> {
     fn receive(&mut self, b: &mut [u8], t: u32) -> io::Result<usize> {
         self.0.receive(b, t)
+    }
+}
+impl<T: DuplexServiceTransport> airtraffic::handshake::DuplexTransport for Bridge<T> {
+    fn send(&mut self, bytes: &[u8], timeout_ms: u32) -> io::Result<usize> {
+        self.0.send(bytes, timeout_ms)
     }
 }
 fn watchdog(args: &Args, cancel: &AtomicBool) -> u8 {
@@ -163,6 +177,12 @@ fn watchdog(args: &Args, cancel: &AtomicBool) -> u8 {
     }
 }
 fn run(args: &Args, cancel: &AtomicBool) -> device::Result<u8> {
+    if matches!(args.command, Command::AtcReady { apply: false }) {
+        emit(
+            &json!({"event":"dry_run","applied":false,"plan":["verify existing host pairing and selected transport","start com.apple.atc with required TLS","receive SyncAllowed","send HostInfo on session 0","send RequestingSync(Book) on session 1","answer Ping with Pong","stop on ReadyForSync or any failure","close service"],"metadata_or_assets_sent":false}),
+        );
+        return Ok(0);
+    }
     let provider = LinuxDeviceProvider;
     emit(&json!({"event":"stage","stage":"enumerate"}));
     let devices = provider.list_devices()?;
@@ -234,6 +254,49 @@ fn run(args: &Args, cancel: &AtomicBool) -> device::Result<u8> {
             emit(&report);
             return Ok(code);
         }
+        Command::AtcReady { apply: true } => {
+            emit(
+                &json!({"event":"stage","stage":"start_service","service":"com.apple.atc","state":"Connecting"}),
+            );
+            let service = match device::open_verified_service(&provider, &selected, "com.apple.atc")
+            {
+                Ok((_, service)) => service,
+                Err(e) => {
+                    emit(
+                        &json!({"event":"atc_ready_complete","state":"Failed","ready_for_sync":false,"stage":"start_service","error":e}),
+                    );
+                    return Ok(3);
+                }
+            };
+            emit(&json!({"event":"service_started","service":"com.apple.atc","tls":service.tls()}));
+            let library_id =
+                std::fs::read_to_string("/proc/sys/kernel/random/uuid").map_err(|_| {
+                    device::Error::new(device::ErrorKind::Native, "generate_library_id")
+                })?;
+            let report = airtraffic::handshake::HandshakeClient {
+                transport: Bridge(service),
+            }
+            .ready(
+                library_id.trim(),
+                Duration::from_secs(args.timeout),
+                &|| cancel.load(Ordering::Relaxed),
+                emit,
+            );
+            let code = if report.ready_for_sync {
+                0
+            } else if report
+                .failure
+                .as_ref()
+                .is_some_and(|f| f.kind == airtraffic::handshake::FailureKind::Cancelled)
+            {
+                130
+            } else {
+                3
+            };
+            emit(&report);
+            return Ok(code);
+        }
+        Command::AtcReady { apply: false } => unreachable!("dry run handled before device access"),
         Command::Syslog { duration, raw } => {
             capture(&provider, &selected, *duration, *raw, false, false, cancel)?
         }

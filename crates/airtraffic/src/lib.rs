@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-//! Protocol research primitives. No unverified framing or envelopes are sent to a device.
+//! Native ATC observation and bounded handshake. No metadata or asset completion is sent.
 use aircard_core::{MAX_PLIST_BYTES, decode_binary, encode_binary, safe_leaf};
 use plist::{Dictionary, Value};
 use serde::Serialize;
@@ -9,6 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 use thiserror::Error;
+pub mod handshake;
 pub mod observation;
 
 #[derive(Debug, Error)]
@@ -24,7 +25,7 @@ pub enum Error {
     #[error("manifest rejected: {0}")]
     Manifest(&'static str),
 }
-/// Generic candidate codec, ONLY for synthetic fixtures/research. ATC framing is unconfirmed.
+/// BE32 candidate codec, ONLY for synthetic fixtures/research. ATC uses LE32 (see handshake).
 pub mod research_framing {
     use super::*;
     pub fn read_be32_binary(reader: &mut impl Read) -> Result<Value, Error> {

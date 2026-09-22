@@ -41,6 +41,14 @@ unsafe extern "C" {
         timeout: u32,
         error: *mut Error,
     ) -> c_int;
+    fn ac_send(
+        service: *mut c_void,
+        buf: *const c_char,
+        size: u32,
+        sent: *mut u32,
+        timeout: u32,
+        error: *mut Error,
+    ) -> c_int;
     fn ac_afc_free(afc: *mut c_void);
     fn ac_dictionary_free(dict: *mut *mut c_char);
     fn ac_afc_list(
@@ -203,6 +211,27 @@ pub struct Service {
     _session: Session,
 }
 impl Service {
+    pub fn send(&mut self, buf: &[u8], timeout_ms: u32) -> Result<usize> {
+        let len = size(buf.len())?;
+        if len == 0 {
+            return Ok(0);
+        }
+        let mut sent = 0;
+        let mut error = Error::default();
+        // SAFETY: uniquely owned live connection, readable len-byte buffer and valid output pointers.
+        let code = unsafe {
+            ac_send(
+                self.ptr.as_ptr(),
+                buf.as_ptr().cast(),
+                len,
+                &mut sent,
+                timeout_ms,
+                &mut error,
+            )
+        };
+        check(code, error)?;
+        Ok(sent as usize)
+    }
     pub fn receive(&mut self, buf: &mut [u8], timeout_ms: u32) -> Result<usize> {
         let len = size(buf.len())?;
         let mut received = 0;

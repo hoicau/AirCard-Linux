@@ -152,6 +152,10 @@ pub trait ServiceTransport {
     fn receive(&mut self, buf: &mut [u8], timeout_ms: u32) -> io::Result<usize>;
     fn tls(&self) -> bool;
 }
+/// A writable service connection; receive-only mocks/providers need not implement it.
+pub trait DuplexServiceTransport: ServiceTransport {
+    fn send(&mut self, buf: &[u8], timeout_ms: u32) -> io::Result<usize>;
+}
 pub trait AfcAccess {
     fn list(&mut self, path: &str) -> Result<Vec<String>>;
     fn read(&mut self, path: &str, limit: usize) -> Result<Vec<u8>>;
@@ -248,6 +252,19 @@ impl ServiceTransport for LinuxService {
     }
     fn tls(&self) -> bool {
         self.0.tls
+    }
+}
+impl DuplexServiceTransport for LinuxService {
+    fn send(&mut self, buf: &[u8], timeout_ms: u32) -> io::Result<usize> {
+        self.0.send(buf, timeout_ms).map_err(|e| {
+            let error = Error::native(e, "send");
+            let kind = match error.kind {
+                ErrorKind::Timeout => io::ErrorKind::TimedOut,
+                ErrorKind::Disconnected => io::ErrorKind::ConnectionReset,
+                _ => io::ErrorKind::Other,
+            };
+            io::Error::new(kind, error)
+        })
     }
 }
 pub struct LinuxAfc(native::Afc);

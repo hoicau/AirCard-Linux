@@ -1,5 +1,9 @@
 # AirTraffic protocol research: stage 2
 
+**Historical receive-only baseline, commit `a84e0d6`.** The outbound investigation and
+current stopping point are superseded by [ReadyForSync research](READY-FOR-SYNC.md).
+The observations and limitations below describe that earlier passive implementation.
+
 Date: 2026-09-22. Scope: public source review and passive observations of one explicitly
 authorized, already paired iOS 27.0 iPhone over USB. No Apple binaries were used.
 

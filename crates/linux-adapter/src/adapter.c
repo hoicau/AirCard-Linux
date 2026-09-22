@@ -9,6 +9,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <sys/socket.h>
+#include <sys/time.h>
 
 typedef struct { int domain; int code; } ac_error;
 typedef struct { char udid[128]; int transport; } ac_device;
@@ -121,6 +123,16 @@ int ac_receive(void *p, char *buf, uint32_t size, uint32_t *received, uint32_t t
     int r = idevice_connection_receive_timeout(p, buf, size, received, timeout);
     /* Preserve partial data before reporting a later timeout. */
     if (*received) return 0;
+    return r ? fail(e, 1, r) : 0;
+}
+int ac_send(void *p, const char *buf, uint32_t size, uint32_t *sent, uint32_t timeout, ac_error *e) {
+    int fd = -1;
+    int r = idevice_connection_get_fd(p, &fd);
+    if (r) return fail(e, 1, r);
+    struct timeval tv = { (time_t)(timeout / 1000), (suseconds_t)((timeout % 1000) * 1000) };
+    if (!timeout || setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) != 0)
+        return fail(e, 6, -1);
+    r = idevice_connection_send(p, buf, size, sent);
     return r ? fail(e, 1, r) : 0;
 }
 void ac_afc_free(void *p) { afc_client_free(p); }
