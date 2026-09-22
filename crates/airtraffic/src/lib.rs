@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-//! Native ATC observation and bounded handshake. No metadata or asset completion is sent.
+//! Native ATC observation, bounded handshake and strictly validated Book synchronization.
 use aircard_core::{MAX_PLIST_BYTES, decode_binary, encode_binary, safe_leaf};
 use plist::{Dictionary, Value};
 use serde::Serialize;

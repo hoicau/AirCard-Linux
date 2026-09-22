@@ -1,3 +1,6 @@
+> Historical token-free investigation. The subsequently authorized Grappa experiment
+> reached ReadyForSync and a verified single-asset sync. See [STATUS.md](STATUS.md).
+
 # Native ReadyForSync handshake
 
 Date: 2026-09-22. Scope: extend the Linux PoC through an exact `ReadyForSync` response

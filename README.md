@@ -1,5 +1,15 @@
 # AirCard-Linux
 
+Hardware JSON reports under `docs/evidence/` are local-only and excluded from Git history.
+Public research notes retain aggregate results; no evidence JSON is distributed.
+
+> **Current checkpoint (2026-09-22):** USB ReadyForSync and controlled single-Book sync,
+> byte verification and full restore have succeeded. Stage 4 offline resources and
+> snapshot/recovery CLI are implemented; final feature acceptance remains incomplete.
+> See [current status and commands](docs/STATUS.md) and
+> [Debian/Ubuntu, Arch/Manjaro and Fedora installation guide](docs/INSTALL.md).
+> The earlier PoC report below is historical and predates the authorized Grappa experiment.
+
 **Experimental native Linux CLI PoC.** Work only with your own explicitly authorized,
 already paired iPhone. This implementation never initiates pairing or bypasses trust.
 

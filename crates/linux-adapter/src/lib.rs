@@ -50,6 +50,12 @@ unsafe extern "C" {
         error: *mut Error,
     ) -> c_int;
     fn ac_afc_free(afc: *mut c_void);
+    fn ac_afc_rename(
+        afc: *mut c_void,
+        source: *const c_char,
+        target: *const c_char,
+        error: *mut Error,
+    ) -> c_int;
     fn ac_dictionary_free(dict: *mut *mut c_char);
     fn ac_afc_list(
         afc: *mut c_void,
@@ -269,6 +275,21 @@ pub struct Afc {
     _session: Session,
 }
 impl Afc {
+    pub fn rename(&mut self, source: &str, target: &str) -> Result<()> {
+        let source = cstring(source)?;
+        let target = cstring(target)?;
+        let mut error = Error::default();
+        // SAFETY: live exclusively borrowed client and valid C strings/output pointer.
+        let code = unsafe {
+            ac_afc_rename(
+                self.ptr.as_ptr(),
+                source.as_ptr(),
+                target.as_ptr(),
+                &mut error,
+            )
+        };
+        check(code, error)
+    }
     fn dictionary(&mut self, path: &str, info: bool) -> Result<Vec<String>> {
         let path = cstring(path)?;
         let mut ptr = std::ptr::null_mut();

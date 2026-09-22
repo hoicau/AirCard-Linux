@@ -23,7 +23,11 @@ The subsequent native handshake references public wire behavior in
 (MIT). The client is independently implemented with strict session/order validation,
 resource bounds and terminal rejection handling. The complete pinned source record,
 including inspected but unused Grappa wrappers, is in [READY-FOR-SYNC.md](READY-FOR-SYNC.md).
-No static authentication-token data or private-library helper is copied or executed.
+No authentication-token table or private-library helper is shipped. The owner explicitly
+authorized a controlled experiment with index 0 of the pinned public Grappa table; that
+temporary token was deleted afterward. The CLI accepts only caller-supplied token files.
+Core assets.rs and passthm.rs adapt the upstream MIT image_skin.rs, passthm.rs and
+card resource names; filesystem and protected-path write mechanisms are excluded.
 
 ## Adapter choice
 

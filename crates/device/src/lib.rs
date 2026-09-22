@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+pub mod books;
 use aircard_linux_adapter as native;
 pub mod self_test;
 use serde::Serialize;
@@ -48,6 +49,7 @@ pub enum ErrorKind {
     InvalidInput,
     NotFound,
     Native,
+    Conflict,
 }
 #[derive(Debug, Error, Serialize)]
 #[error("{kind:?} at {operation} (native domain={domain}, code={code}): {hint}")]
@@ -89,6 +91,9 @@ impl Error {
             }
             ErrorKind::InvalidInput => "Input violates the configured path or size limits.",
             ErrorKind::NotFound => "The requested AFC path does not exist.",
+            ErrorKind::Conflict => {
+                "Device state changed or target already exists; no automatic overwrite is allowed."
+            }
             ErrorKind::Native => {
                 "Native operation failed; retain only the domain/code and operation for diagnosis."
             }
@@ -156,7 +161,26 @@ pub trait ServiceTransport {
 pub trait DuplexServiceTransport: ServiceTransport {
     fn send(&mut self, buf: &[u8], timeout_ms: u32) -> io::Result<usize>;
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum FileKind {
+    File,
+    Directory,
+    Symlink,
+    Other,
+}
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct FileInfo {
+    pub kind: FileKind,
+    pub size: u64,
+}
 pub trait AfcAccess {
+    fn stat(&mut self, _path: &str) -> Result<FileInfo> {
+        Err(Error::new(ErrorKind::InvalidInput, "stat_unsupported"))
+    }
+    fn rename(&mut self, _source: &str, _target: &str) -> Result<()> {
+        Err(Error::new(ErrorKind::InvalidInput, "rename_unsupported"))
+    }
+
     fn list(&mut self, path: &str) -> Result<Vec<String>>;
     fn read(&mut self, path: &str, limit: usize) -> Result<Vec<u8>>;
     fn mkdir(&mut self, path: &str) -> Result<()>;
@@ -233,7 +257,7 @@ impl DeviceProvider for LinuxDeviceProvider {
     fn afc(&self, device: &Device) -> Result<LinuxAfc> {
         self.session(device)?
             .afc()
-            .map(LinuxAfc)
+            .map(|inner| LinuxAfc(inner, false))
             .map_err(|e| Error::native(e, "start_afc"))
     }
 }
@@ -267,8 +291,29 @@ impl DuplexServiceTransport for LinuxService {
         })
     }
 }
-pub struct LinuxAfc(native::Afc);
+pub struct LinuxAfc(native::Afc, bool);
 impl LinuxAfc {
+    /// Capability used only by an explicitly applied, snapshotted Books transaction.
+    pub fn with_books_write_scope(mut self) -> Self {
+        self.1 = true;
+        self
+    }
+    fn writable(&self, path: &str) -> Result<()> {
+        self::path(path)?;
+        if self.1
+            && (path == "Books"
+                || path.starts_with("Books/")
+                || path == "Airlock"
+                || path == "Airlock/Book"
+                || path.strip_prefix("Airlock/Book/").is_some_and(|leaf| {
+                    leaf.starts_with("AirCard-Linux-Test-") && aircard_core::safe_leaf(leaf).is_ok()
+                }))
+        {
+            return Ok(());
+        }
+        writable(path)
+    }
+
     fn reject_symlinks(&mut self, value: &str, include_leaf: bool) -> Result<()> {
         path(value)?;
         if value == "." {
@@ -318,13 +363,57 @@ fn writable(path: &str) -> Result<()> {
     Ok(())
 }
 impl AfcAccess for LinuxAfc {
+    fn stat(&mut self, value: &str) -> Result<FileInfo> {
+        self.reject_symlinks(value, false)?;
+        let info = self
+            .0
+            .info(value)
+            .map_err(|e| Error::native(e, "afc_stat"))?;
+        let get = |key: &str| {
+            info.as_chunks::<2>()
+                .0
+                .iter()
+                .find(|p| p[0] == key)
+                .map(|p| p[1].as_str())
+        };
+        let kind = match get("st_ifmt") {
+            Some("S_IFREG") => FileKind::File,
+            Some("S_IFDIR") => FileKind::Directory,
+            Some("S_IFLNK") => FileKind::Symlink,
+            _ => FileKind::Other,
+        };
+        let size = get("st_size")
+            .and_then(|s| s.parse().ok())
+            .ok_or_else(|| Error::new(ErrorKind::Native, "afc_invalid_stat"))?;
+        Ok(FileInfo { kind, size })
+    }
+    fn rename(&mut self, source: &str, target: &str) -> Result<()> {
+        self.writable(source)?;
+        self.writable(target)?;
+        self.reject_symlinks(source, true)?;
+        self.reject_symlinks(target, false)?;
+        match self.stat(target) {
+            Ok(info) if info.kind != FileKind::File => {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "rename_target_not_regular",
+                ));
+            }
+            Err(e) if e.kind != ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
+        self.0
+            .rename(source, target)
+            .map_err(|e| Error::native(e, "afc_rename"))
+    }
+
     fn list(&mut self, value: &str) -> Result<Vec<String>> {
         self.reject_symlinks(value, true)?;
         self.0.list(value).map_err(|e| Error::native(e, "afc_list"))
     }
     fn read(&mut self, value: &str, limit: usize) -> Result<Vec<u8>> {
         self.reject_symlinks(value, true)?;
-        if limit > 1024 * 1024 {
+        if limit > 16 * 1024 * 1024 {
             return Err(Error::new(ErrorKind::InvalidInput, "afc_read_limit"));
         }
         let info = self
@@ -365,21 +454,21 @@ impl AfcAccess for LinuxAfc {
         Ok(data)
     }
     fn mkdir(&mut self, value: &str) -> Result<()> {
-        writable(value)?;
+        self.writable(value)?;
         self.reject_symlinks(value, false)?;
         self.0
             .mkdir(value)
             .map_err(|e| Error::native(e, "afc_mkdir"))
     }
     fn write(&mut self, value: &str, data: &[u8]) -> Result<()> {
-        writable(value)?;
+        self.writable(value)?;
         self.reject_symlinks(value, false)?;
         match self.0.info(value) {
             Err(e) if e.domain == 4 && e.code == 8 => {}
             Err(e) => return Err(Error::native(e, "afc_write_stat")),
             Ok(_) => return Err(Error::new(ErrorKind::InvalidInput, "afc_refuse_overwrite")),
         }
-        if data.len() > 1024 * 1024 {
+        if data.len() > 16 * 1024 * 1024 {
             return Err(Error::new(ErrorKind::InvalidInput, "afc_write_limit"));
         }
         let mut file = self
@@ -399,7 +488,7 @@ impl AfcAccess for LinuxAfc {
         file.close().map_err(|e| Error::native(e, "afc_close"))
     }
     fn remove(&mut self, value: &str) -> Result<()> {
-        writable(value)?;
+        self.writable(value)?;
         self.reject_symlinks(value, true)?;
         self.0
             .remove(value)

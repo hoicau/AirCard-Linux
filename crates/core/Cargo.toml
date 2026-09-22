@@ -10,6 +10,10 @@ thiserror.workspace = true
 plist.workspace = true
 regex = "1"
 base64 = "0.22"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
+zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+miniz_oxide = "0.8"
+sha2 = "0.10"
 
 [lints]
 workspace = true

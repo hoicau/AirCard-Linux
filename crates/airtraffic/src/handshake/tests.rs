@@ -384,3 +384,201 @@ fn invalid_host_identity_fails_without_io() {
     assert_eq!(report.bytes_received, 0);
     assert!(trace.borrow().sent.is_empty());
 }
+
+#[test]
+fn explicit_grappa_requires_matching_capabilities_and_correct_payload_fields() {
+    let token = [0x5a; 84];
+    for version in [1, 2] {
+        let mut data = incoming(
+            "Capabilities",
+            0,
+            Some(Dictionary::from_iter([(
+                "GrappaSupportInfo",
+                Value::Dictionary(Dictionary::from_iter([
+                    ("version", Value::Integer(version.into())),
+                    ("deviceType", Value::Integer(0.into())),
+                    ("protocolVersion", Value::Integer(1.into())),
+                ])),
+            )])),
+        );
+        data.extend(message("SyncAllowed", 0));
+        data.extend(message("ReadyForSync", 1));
+        let (mock, trace) = Mock::new(data);
+        let report = HandshakeClient { transport: mock }.ready_authenticated(
+            LIBRARY,
+            Some(&token),
+            Duration::from_secs(2),
+            &|| false,
+            |_| {},
+        );
+        if version == 1 {
+            assert!(report.ready_for_sync);
+            let sent = sent_messages(&trace.borrow().sent);
+            for msg in &sent {
+                let params = msg.as_dictionary().unwrap()["Params"]
+                    .as_dictionary()
+                    .unwrap();
+                assert_eq!(
+                    params["HostInfo"].as_dictionary().unwrap()["Grappa"].as_data(),
+                    Some(token.as_slice())
+                );
+            }
+            assert_eq!(
+                sent[1].as_dictionary().unwrap()["Params"]
+                    .as_dictionary()
+                    .unwrap()["Grappa"]
+                    .as_data(),
+                Some(token.as_slice())
+            );
+        } else {
+            assert_eq!(report.failure.unwrap().kind, FailureKind::UnsupportedGrappa);
+            assert!(trace.borrow().sent.is_empty());
+        }
+    }
+}
+
+#[test]
+fn malformed_grappa_token_is_rejected_before_device_io() {
+    let (mock, trace) = Mock::new(message("SyncAllowed", 0));
+    let report = HandshakeClient { transport: mock }.ready_authenticated(
+        LIBRARY,
+        Some(&[0; 83]),
+        Duration::from_secs(1),
+        &|| false,
+        |_| {},
+    );
+    assert_eq!(report.failure.unwrap().kind, FailureKind::InvalidInput);
+    assert_eq!(report.bytes_received, 0);
+    assert!(trace.borrow().closed);
+}
+
+#[test]
+fn updated_sync_allowed_is_advisory_and_still_requires_ready() {
+    for ready in [true, false] {
+        let mut data = message("SyncAllowed", 0);
+        data.extend(incoming(
+            "SyncAllowed",
+            1,
+            Some(Dictionary::from_iter([(
+                "DataProtected",
+                Value::Boolean(false),
+            )])),
+        ));
+        for command in ["InstalledAssets", "AssetMetrics"] {
+            data.extend(message(command, 1));
+        }
+        if ready {
+            data.extend(message("ReadyForSync", 1));
+        }
+        let (mock, _) = Mock::new(data);
+        let report = run(mock);
+        assert_eq!(report.ready_for_sync, ready);
+        if !ready {
+            assert_eq!(report.failure.unwrap().kind, FailureKind::Disconnected);
+        }
+    }
+}
+
+#[test]
+fn retained_session_one_startup_still_requires_new_explicit_ready() {
+    let mut data = message("Capabilities", 1);
+    data.extend(message("InstalledAssets", 1));
+    data.extend(message("AssetMetrics", 1));
+    data.extend(message("SyncAllowed", 1));
+    data.extend(message("ReadyForSync", 1));
+    let (mock, trace) = Mock::new(data);
+    assert!(run(mock).ready_for_sync);
+    assert_eq!(sent_messages(&trace.borrow().sent).len(), 2);
+}
+
+#[test]
+fn single_asset_requires_exact_manifest_and_explicit_finish() {
+    for mode in [0, 1, 2] {
+        let mut data = message("SyncAllowed", 0);
+        data.extend(message("ReadyForSync", 1));
+        data.extend(incoming(
+            "AssetManifest",
+            1,
+            Some(Dictionary::from_iter([(
+                "AssetManifest",
+                Value::Dictionary(Dictionary::from_iter([(
+                    "Book",
+                    Value::Array(vec![Value::Dictionary(Dictionary::from_iter([
+                        (
+                            "AssetID",
+                            Value::String(
+                                if mode == 1 {
+                                    "unexpected"
+                                } else {
+                                    "synthetic.epub"
+                                }
+                                .into(),
+                            ),
+                        ),
+                        ("IsDownload", Value::Boolean(true)),
+                    ]))]),
+                )])),
+            )])),
+        ));
+        if mode != 2 {
+            data.extend(incoming("SyncFinished", 1, None));
+        }
+        let (mock, trace) = Mock::new(data);
+        let report = HandshakeClient { transport: mock }.synchronize(
+            SyncOptions {
+                library_id: LIBRARY,
+                grappa: None,
+                timeout: Duration::from_secs(2),
+                cancelled: &|| false,
+            },
+            &SyncAsset {
+                asset_id: "synthetic.epub".into(),
+                asset_path: "Books/synthetic.epub".into(),
+                retained_ids: Default::default(),
+            },
+            |_| {},
+        );
+        assert!(report.ready_for_sync);
+        assert!(report.metadata_or_assets_sent);
+        assert_eq!(report.manifest_validated, mode != 1);
+        assert_eq!(report.asset_completion_sent, mode != 1);
+        assert_eq!(report.state == State::Finished, mode == 0);
+        let sent = sent_messages(&trace.borrow().sent);
+        assert_eq!(sent.len(), if mode == 1 { 3 } else { 4 });
+        assert_eq!(
+            sent[2].as_dictionary().unwrap()["Command"].as_string(),
+            Some("FinishedSyncingMetadata")
+        );
+        if mode != 1 {
+            assert_eq!(
+                sent[3].as_dictionary().unwrap()["Command"].as_string(),
+                Some("FileComplete")
+            );
+        }
+    }
+}
+
+#[test]
+fn preserved_assets_must_not_be_requested_as_downloads() {
+    let asset = SyncAsset {
+        asset_id: "new.epub".into(),
+        asset_path: "Books/new.epub".into(),
+        retained_ids: std::collections::BTreeSet::from(["old-id".into()]),
+    };
+    for old_download in [false, true] {
+        let entries = [("new.epub", true), ("old-id", old_download)]
+            .into_iter()
+            .map(|(id, download)| {
+                Value::Dictionary(Dictionary::from_iter([
+                    ("AssetID", Value::String(id.into())),
+                    ("IsDownload", Value::Boolean(download)),
+                ]))
+            })
+            .collect();
+        let manifest = Value::Dictionary(Dictionary::from_iter([("Book", Value::Array(entries))]));
+        assert_eq!(
+            validate_selected_manifest(&manifest, &asset).is_ok(),
+            !old_download
+        );
+    }
+}

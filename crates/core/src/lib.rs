@@ -1,5 +1,8 @@
 #![forbid(unsafe_code)]
 //! Platform-independent data validation. No device or GUI dependencies.
+pub mod assets;
+pub mod books;
+pub mod passthm;
 pub mod scanner;
 use plist::Value;
 use serde::{Deserialize, Serialize};
@@ -59,19 +62,23 @@ fn validate_value(value: &Value, depth: usize, nodes: &mut usize) -> Result<(), 
     Ok(())
 }
 pub fn decode_binary(bytes: &[u8]) -> Result<Value, Error> {
-    if bytes.len() > MAX_PLIST_BYTES {
-        return Err(Error::Limit);
-    }
     if !bytes.starts_with(b"bplist00") {
         return Err(Error::NotBinary);
     }
+    decode_plist(bytes)
+}
+/// Bounded XML/binary/ASCII plist decoder for local resource and Books metadata.
+pub fn decode_plist(bytes: &[u8]) -> Result<Value, Error> {
+    if bytes.len() > MAX_PLIST_BYTES {
+        return Err(Error::Limit);
+    }
     // Bound the event stream BEFORE building a recursive Value. Binary plists can
     // reference the same object repeatedly, so wire size alone is not a memory bound.
-    use plist::stream::{BinaryReader, Event};
+    use plist::stream::{Event, Reader};
     let mut events = Vec::new();
     let mut depth = 0usize;
     let mut expanded_bytes = 0usize;
-    for event in BinaryReader::new(Cursor::new(bytes)) {
+    for event in Reader::new(Cursor::new(bytes)) {
         let event = event?;
         match &event {
             Event::StartArray(length) | Event::StartDictionary(length) => {
@@ -145,6 +152,12 @@ impl LogLines {
         lines
     }
 }
+/// Stable checksum for local integrity/device-binding; callers must keep device digests private.
+pub fn sha256(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(bytes))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

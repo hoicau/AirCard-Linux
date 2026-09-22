@@ -149,6 +149,9 @@ int ac_afc_mkdir(void *p, const char *path, ac_error *e) {
 int ac_afc_remove(void *p, const char *path, ac_error *e) {
     int r = afc_remove_path(p, path); return r ? fail(e, 4, r) : 0;
 }
+int ac_afc_rename(void *p, const char *source, const char *target, ac_error *e) {
+    int r = afc_rename_path(p, source, target); return r ? fail(e, 4, r) : 0;
+}
 int ac_afc_open(void *p, const char *path, int write, uint64_t *handle, ac_error *e) {
     int r = afc_file_open(p, path, write ? AFC_FOPEN_WRONLY : AFC_FOPEN_RDONLY, handle);
     return r ? fail(e, 4, r) : 0;

@@ -1,4 +1,7 @@
 #![forbid(unsafe_code)]
+mod books;
+mod local;
+mod resources;
 use airtraffic::{AirTrafficClient, PassiveClient, ReceiveTransport};
 use clap::{Parser, Subcommand, ValueEnum};
 use device::{
@@ -33,7 +36,7 @@ impl From<Route> for Transport {
 #[command(
     name = "aircard",
     version,
-    about = "Experimental paired-device Linux PoC. ATC handshake requires --apply; no asset sync."
+    about = "Experimental native Linux device and offline resource tools. Device writes require --apply."
 )]
 struct Args {
     #[arg(long, global = true)]
@@ -48,6 +51,47 @@ struct Args {
 }
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Offline center crop, PNG preview and Wallet resource ZIP. No output means dry-run.
+    PrepareCard {
+        input: std::path::PathBuf,
+        #[arg(long)]
+        output: Option<std::path::PathBuf>,
+        #[arg(long)]
+        preview: Option<std::path::PathBuf>,
+    },
+    /// Offline bounded passthm conversion; --preview exports normalized keypad PNGs in ZIP.
+    PrepareTheme {
+        input: std::path::PathBuf,
+        #[arg(long)]
+        output: Option<std::path::PathBuf>,
+        #[arg(long)]
+        preview: Option<std::path::PathBuf>,
+        #[arg(long, default_value="en", value_parser=["en","ru","uk","ja","all"])]
+        language: String,
+        #[arg(long, default_value_t=10, value_parser=clap::value_parser!(u8).range(8..=10))]
+        telephony: u8,
+        #[arg(long)]
+        bold: bool,
+    },
+    /// Save a full bounded Books snapshot to a new private local file (read-only device access).
+    BooksSnapshot { output: std::path::PathBuf },
+    /// Validate and preview a Books backup offline. --apply restores on its original device.
+    BooksRestore {
+        input: std::path::PathBuf,
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Controlled synthetic Book sync, byte verification and automatic full restore.
+    BooksTest {
+        /// New private recovery journal; deleted only after verified restoration.
+        #[arg(long)]
+        journal: std::path::PathBuf,
+        /// Caller-supplied 84-byte Grappa token, private local file. Never logged or shipped.
+        #[arg(long)]
+        grappa_token: Option<std::path::PathBuf>,
+        #[arg(long)]
+        apply: bool,
+    },
     /// Enumerate routes and verify existing host pairing. Identifiers redacted by default.
     Devices {
         #[arg(long)]
@@ -75,6 +119,8 @@ enum Command {
     AtcSmoke,
     /// Attempt HostInfo/RequestingSync and stop at ReadyForSync. No metadata or asset transfer.
     AtcReady {
+        #[arg(long)]
+        grappa_token: Option<std::path::PathBuf>,
         /// Required to open a device sync session; otherwise only show the plan.
         #[arg(long)]
         apply: bool,
@@ -134,6 +180,7 @@ fn watchdog(args: &Args, cancel: &AtomicBool) -> u8 {
         Command::Syslog { duration, .. } | Command::Scan { duration, .. } => {
             *duration + args.timeout + 5
         }
+        Command::BooksTest { .. } | Command::BooksRestore { .. } => args.timeout + 35,
         _ => args.timeout + 5,
     };
     let start = Instant::now();
@@ -165,7 +212,7 @@ fn watchdog(args: &Args, cancel: &AtomicBool) -> u8 {
             }
             let _ = child.wait();
             emit(
-                &json!({"event":"error","kind":if cancel.load(Ordering::Relaxed){"cancelled"}else{"native_call_deadline"},"stage":"worker","hint":"Inspect the last stage event. An interrupted AFC self-test may require scratch cleanup."}),
+                &json!({"event":"error","kind":if cancel.load(Ordering::Relaxed){"cancelled"}else{"native_call_deadline"},"stage":"worker","hint":"Inspect the last stage event. For an interrupted books-test, keep its journal and use books-restore JOURNAL --apply on the original device; AFC self-test may require scratch cleanup."}),
             );
             return if cancel.load(Ordering::Relaxed) {
                 130
@@ -177,7 +224,13 @@ fn watchdog(args: &Args, cancel: &AtomicBool) -> u8 {
     }
 }
 fn run(args: &Args, cancel: &AtomicBool) -> device::Result<u8> {
-    if matches!(args.command, Command::AtcReady { apply: false }) {
+    if let Some(code) = resources::run(&args.command)? {
+        return Ok(code);
+    }
+    if let Some(code) = books::offline(&args.command)? {
+        return Ok(code);
+    }
+    if matches!(args.command, Command::AtcReady { apply: false, .. }) {
         emit(
             &json!({"event":"dry_run","applied":false,"plan":["verify existing host pairing and selected transport","start com.apple.atc with required TLS","receive SyncAllowed","send HostInfo on session 0","send RequestingSync(Book) on session 1","answer Ping with Pong","stop on ReadyForSync or any failure","close service"],"metadata_or_assets_sent":false}),
         );
@@ -214,7 +267,14 @@ fn run(args: &Args, cancel: &AtomicBool) -> device::Result<u8> {
     let info = provider.pairing(&selected)?;
     emit(&json!({"event":"paired","info":info}));
     match &args.command {
-        Command::Devices { .. } => unreachable!(),
+        Command::Devices { .. } | Command::PrepareCard { .. } | Command::PrepareTheme { .. } => {
+            unreachable!()
+        }
+        Command::BooksSnapshot { .. }
+        | Command::BooksRestore { .. }
+        | Command::BooksTest { .. } => {
+            return books::run(&args.command, &provider, &selected, args.timeout, cancel);
+        }
         Command::Probe | Command::Snapshot => {
             emit(&json!({"event":"stage","stage":"start_afc"}));
             let mut afc = provider.afc(&selected)?;
@@ -254,7 +314,10 @@ fn run(args: &Args, cancel: &AtomicBool) -> device::Result<u8> {
             emit(&report);
             return Ok(code);
         }
-        Command::AtcReady { apply: true } => {
+        Command::AtcReady {
+            apply: true,
+            grappa_token,
+        } => {
             emit(
                 &json!({"event":"stage","stage":"start_service","service":"com.apple.atc","state":"Connecting"}),
             );
@@ -276,8 +339,9 @@ fn run(args: &Args, cancel: &AtomicBool) -> device::Result<u8> {
             let report = airtraffic::handshake::HandshakeClient {
                 transport: Bridge(service),
             }
-            .ready(
+            .ready_authenticated(
                 library_id.trim(),
+                local::token(grappa_token.as_deref())?.as_deref(),
                 Duration::from_secs(args.timeout),
                 &|| cancel.load(Ordering::Relaxed),
                 emit,
@@ -296,7 +360,9 @@ fn run(args: &Args, cancel: &AtomicBool) -> device::Result<u8> {
             emit(&report);
             return Ok(code);
         }
-        Command::AtcReady { apply: false } => unreachable!("dry run handled before device access"),
+        Command::AtcReady { apply: false, .. } => {
+            unreachable!("dry run handled before device access")
+        }
         Command::Syslog { duration, raw } => {
             capture(&provider, &selected, *duration, *raw, false, false, cancel)?
         }
