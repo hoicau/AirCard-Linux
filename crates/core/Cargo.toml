@@ -1,0 +1,15 @@
+[package]
+name = "aircard-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+plist.workspace = true
+regex = "1"
+base64 = "0.22"
+
+[lints]
+workspace = true

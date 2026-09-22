@@ -1,0 +1,9 @@
+/target/
+/.local/
+*.session.json
+*.session.jsonl
+*.snapshot.plist
+*.pairrecord
+
+# Hardware session evidence stays local and is never published.
+/docs/evidence/
