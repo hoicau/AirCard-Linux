@@ -2,25 +2,39 @@ name: Linux native
 on:
   push:
   pull_request:
+  workflow_call:
 permissions:
   contents: read
 jobs:
   checks:
-    strategy:
-      matrix:
-        os: [ubuntu-22.04, ubuntu-24.04]
-        toolchain: [stable]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
       - name: Native development and headless graphics libraries
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config libimobiledevice-dev libplist-dev libusbmuxd-dev libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxkbcommon-dev libxkbcommon-x11-0 libwayland-dev libegl1-mesa-dev libgl1-mesa-dev libgl1-mesa-dri xvfb xauth python3 binutils
-      - name: Rust stable
+      - name: Latest stable Rust
         run: |
-          rustup toolchain install ${{ matrix.toolchain }} --profile minimal --component rustfmt --component clippy
-          rustup override set ${{ matrix.toolchain }}
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          rustup override set stable
+      - name: Verify release tag matches binary version
+        if: github.event_name == 'release'
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess
+          metadata = json.loads(subprocess.check_output([
+              "cargo", "metadata", "--locked", "--no-deps", "--format-version", "1",
+          ]))
+          versions = {p["version"] for p in metadata["packages"] if p["name"] in {"cli", "gui"}}
+          if versions != {os.environ["RELEASE_TAG"].removeprefix("v")}:
+              raise SystemExit("Release tag must match the CLI/GUI version (for example v0.1.0)")
+          PY
       - run: cargo fmt --check
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo test --locked --workspace
@@ -31,14 +45,15 @@ jobs:
           xvfb-run -a -s '-screen 0 1280x960x24 -nolisten tcp' env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET LIBGL_ALWAYS_SOFTWARE=1 timeout 40s target/release/aircard-gui --smoke-dir .local/gui-smoke
           python3 scripts/check-gui-smoke.py .local/gui-smoke
       - name: Native archive
-        run: ./scripts/package-native.sh '${{ matrix.os }}'
+        run: ./scripts/package-native.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: aircard-linux-${{ matrix.os }}
+          name: aircard-linux
           path: |
             dist/*.tar.gz
             dist/*.sha256
           if-no-files-found: error
+          overwrite: true
       - name: Remove temporary UI fixtures
         if: always()
         run: rm -rf .local/gui-smoke

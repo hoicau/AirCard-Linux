@@ -98,7 +98,7 @@ All card-changing commands default to dry-run and require `--apply`.
 | Linux x86_64, USB, iOS 27.0 | Card application, owner visual check, restore and interrupted recovery verified |
 | Paired Wi-Fi | Explicit route supported; hardware acceptance pending |
 | Other iOS versions/cards | Unverified; resource layout and private services can differ |
-| Ubuntu 22.04/24.04 | CI build/test/package matrix; no iPhone required by CI |
+| GitHub Actions `ubuntu-latest` | CI build/test/package checks with latest stable Rust; no iPhone required by CI |
 | Debian, Arch derivatives, Fedora | Dependency guides supplied; build locally for matching libraries |
 
 The internal Books safeguard is bounded to 1024 entries, 16 MiB per file and 64 MiB total.
@@ -114,8 +114,13 @@ cargo fmt --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo test --locked --workspace
 cargo build --locked --workspace --release
-./scripts/package-native.sh linux-local
+./scripts/package-native.sh
 ```
+
+Publishing a GitHub Release (including a prerelease) runs the `ubuntu-latest` checks
+with latest stable Rust and builds from the release commit. After the build passes, the
+release workflow attaches the native `.tar.gz` archive and SHA256 file. The tag must match
+the CLI/GUI version, for example `v0.1.0`. Ordinary pushes and pull requests produce CI artifacts only.
 
 Core data/image logic is platform-independent. `device` owns the Linux backend,
 `linux-adapter` isolates native FFI, `airtraffic` owns framing/state machines, and CLI/GUI

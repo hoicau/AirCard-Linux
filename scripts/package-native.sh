@@ -2,15 +2,15 @@
 # Explicit allowlist: no device evidence, token, snapshot, source tree or Apple binary.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-label="${1:-local}"
-if [[ ! "$label" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
+label="${1:-}"
+if [[ -n "$label" && ! "$label" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
   echo 'Use a simple distribution label, e.g. debian-13 or arch-x86_64.' >&2
   exit 2
 fi
 cargo build --locked --workspace --release
 arch="$(uname -m)"
 version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="gui"))')"
-name="aircard-linux-${version}-${label}-${arch}"
+name="aircard-linux-${version}${label:+-${label}}-${arch}"
 mkdir -p dist
 if [[ -e "dist/$name.tar.gz" || -e "dist/$name.tar.gz.sha256" ]]; then
   echo 'Output already exists; choose another label or remove your previous artifact.' >&2

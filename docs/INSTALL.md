@@ -146,18 +146,23 @@ Do not launch the GUI as root. It does not install a daemon or persist device id
 ## Native archives
 
 ```sh
-./scripts/package-native.sh manjaro-local
-# Produces dist/aircard-linux-0.1.0-manjaro-local-<architecture>.tar.gz and .sha256
+./scripts/package-native.sh
+# Produces dist/aircard-linux-0.1.0-<architecture>.tar.gz and .sha256
 ```
+
+Pass an optional label, such as `debian-13`, to distinguish local builds.
 
 Packaging additionally needs Python 3, GNU tar, gzip and binutils/readelf. The script
 builds with Cargo.lock, includes the CLI, GUI, license notices, docs and BUILD-INFO, and
 refuses to overwrite an existing archive. It explicitly excludes private device data and
 JSON evidence. Verify the adjacent checksum before extracting, then run `./aircard-gui`
 from the extracted directory. Never mix binaries from different releases.
-CI creates separate Ubuntu 22.04/24.04 archives; these artifacts are not an automatic
-GitHub Release. Other distributions can build with the guide above. Local verification
-was on Manjaro; cross-distribution build availability is not hardware compatibility proof.
+CI builds on `ubuntu-latest` with latest stable Rust; archive names contain the version and CPU architecture. Publishing a GitHub Release,
+including a prerelease, builds its commit through the same checks and attaches the archive
+and its SHA256 file after the build passes. Use a tag matching the CLI/GUI version, such as
+`v0.1.0`; push and pull-request runs upload CI artifacts only. Failed release runs can be
+rerun; successful uploads replace assets with the same names. Other distributions can build
+with the guide above. Build availability is not hardware compatibility proof.
 
 ## USB and Wi-Fi diagnostics
 

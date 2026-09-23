@@ -40,6 +40,6 @@ offline dry-run and excluded commands. GUI tests cover confirmation, redaction a
 Local verification passed: 72 tests, `cargo fmt --check`, workspace clippy with warnings
 denied, release build, six GUI captures and native archive launch/allowlist/checksum checks.
 
-CI is configured for Ubuntu 22.04 and 24.04 with Rust stable: fmt, clippy with warnings denied,
+CI is configured for `ubuntu-latest` with latest stable Rust: fmt, clippy with warnings denied,
 workspace tests, release build, synthetic native GUI captures and allowlisted binary archives.
-A configured matrix is not a claim that hosted jobs have run or that devices were tested there.
+Configured checks do not establish that hosted jobs have run or that devices were tested there.

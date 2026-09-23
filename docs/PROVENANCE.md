@@ -1,14 +1,9 @@
 # Provenance
 
 AirCard-Linux descends from Lumid-Off/AirCard-Windows **v1.2.2**, commit
-`d41aa1f2e1012bcd0af25d26f7579f0c5af645f7`. Its original MIT LICENSE remains byte-for-byte
-unchanged. The upstream tag and Git ancestry preserve the original implementation:
-
-```sh
-git show v1.2.2:src/image_skin.rs
-git show v1.2.2:src/scanner.rs
-git show v1.2.2:src/airlift.rs
-```
+`d41aa1f2e1012bcd0af25d26f7579f0c5af645f7`. The project uses the MIT License,
+with AirCard-Linux copyright attributed to hoicau. Local Git history starts with the
+Linux implementation; the upstream source remains available at the pinned link below.
 
 - [AirCard-Windows](https://github.com/Lumid-Off/AirCard-Windows/tree/d41aa1f2e1012bcd0af25d26f7579f0c5af645f7): image preparation, card resource names, hash-filter behavior and stored StreamingZip layout are adapted from its MIT source. The GUI follows its artwork/background-task workflow. Windows DLL loading is omitted. Lock-screen theme conversion and application are outside this product.
 - [airlift host source](https://github.com/0xjohnnydev/airlift/blob/c684cd41ca0ded2d1ab780c15f6ead05509ce062/Sources/airtraffic_host.m) and [public Python implementation](https://github.com/0xjohnnydev/airlift/blob/c684cd41ca0ded2d1ab780c15f6ead05509ce062/airlift.py): references for high-level sync parameters and observable link/move behavior. No Apple host framework is copied.

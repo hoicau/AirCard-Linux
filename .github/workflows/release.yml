@@ -1,0 +1,39 @@
+name: Release Linux binaries
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event.release.id }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    uses: ./.github/workflows/linux.yml
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download tested native archives
+        uses: actions/download-artifact@v4
+        with:
+          name: aircard-linux
+          path: dist
+      - name: Verify checksums
+        working-directory: dist
+        run: sha256sum --check -- *.tar.gz.sha256
+      - name: Attach binaries and checksums to the published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+        run: |
+          gh release upload "$RELEASE_TAG" dist/*.tar.gz dist/*.tar.gz.sha256 \
+            --repo "$RELEASE_REPOSITORY" --clobber
