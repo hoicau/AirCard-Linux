@@ -1,6 +1,6 @@
 //! Wallet artwork UI with supervised native transactions (MIT).
 use crate::{
-    model::{Confirmation, Device, redacted},
+    model::{Confirmation, Device, Discovery, redacted},
     worker::{self, Message},
 };
 use aircard_core::assets::{PreparedCard, Resource, resources_zip};
@@ -40,13 +40,16 @@ struct Smoke {
     requested: bool,
     started: Instant,
 }
-const SMOKE_NAMES: [&str; 6] = [
+const SMOKE_NAMES: [&str; 9] = [
     "artwork-light",
     "artwork-dark",
     "help-light",
     "device-light",
     "confirmation-dark",
     "compact-light",
+    "listening-light",
+    "no-card-dark",
+    "device-compact-light",
 ];
 pub struct App {
     cli: PathBuf,
@@ -58,14 +61,17 @@ pub struct App {
     card_texture: Option<TextureHandle>,
     cards: Vec<String>,
     card_hash: String,
+    discovery: Discovery,
     devices: Vec<Device>,
     selected: Option<usize>,
     route: String,
     snapshot: String,
     token: String,
+    token_attempted: bool,
     journal: String,
     job: Option<worker::Job>,
     job_name: String,
+    job_error: Option<String>,
     local: Option<LocalReceiver>,
     pending: Option<Confirmation>,
     restore_review: Option<Confirmation>,
@@ -138,19 +144,23 @@ impl App {
             card_texture: None,
             cards: vec![],
             card_hash: String::new(),
+            discovery: Discovery::default(),
             devices: vec![],
             selected: None,
             route: "usb".into(),
             snapshot: String::new(),
-            token: String::new(),
+            token: cli::sync_token::cached()
+                .map_or_else(String::new, |p| p.to_string_lossy().into_owned()),
+            token_attempted: false,
             journal: String::new(),
             job: None,
             job_name: String::new(),
+            job_error: None,
             local: None,
             pending: None,
             restore_review: None,
             stage: "Idle".into(),
-            status: "Prepare artwork, select your iPhone and scan the target card.".into(),
+            status: "Prepare artwork and select your iPhone. Card detection and sync token setup are automatic.".into(),
             failed: false,
             logs: VecDeque::new(),
             details: false,
@@ -206,6 +216,7 @@ impl App {
             return;
         }
         self.failed = false;
+        self.job_error = None;
         self.status = format!("{name} is running.");
         self.stage = name.into();
         self.job_name = name.into();
@@ -217,6 +228,7 @@ impl App {
         }
         self.cards.clear();
         self.card_hash.clear();
+        self.discovery = Discovery::default();
         self.devices.clear();
         self.selected = None;
         self.start(
@@ -229,6 +241,30 @@ impl App {
             args.extend(d.selector());
             self.start(name, args);
         }
+    }
+    fn detect_card(&mut self) {
+        if self.busy() || self.smoke.is_some() || !self.chosen().is_some_and(|d| d.paired) {
+            return;
+        }
+        self.cards.clear();
+        self.card_hash.clear();
+        self.discovery.begin();
+        self.device_job(
+            "Detect Wallet card",
+            vec![
+                "scan".into(),
+                "--duration".into(),
+                "60".into(),
+                "--show-hashes".into(),
+                "--until-match".into(),
+            ],
+        );
+        self.status =
+            "Connecting to iPhone logs. Wait for the prompt before opening your card.".into();
+    }
+    fn setup_token(&mut self) {
+        self.token_attempted = true;
+        self.start("Set up sync token", vec!["setup-token".into()]);
     }
     fn local_job(
         &mut self,
@@ -317,6 +353,24 @@ impl App {
         for message in messages {
             match message {
                 Message::Event(v) => {
+                    if self.job_name == "Detect Wallet card" {
+                        self.discovery.event(&v);
+                        if self.discovery.listening {
+                            self.stage = "Waiting for Wallet".into();
+                            self.status = format!(
+                                "Now open Wallet on your iPhone and tap the intended card. Detection ends automatically when an identifier appears ({} s left).",
+                                self.discovery.remaining
+                            );
+                        }
+                    }
+                    if v["event"] == "token_ready"
+                        && let Some(path) = v["path"].as_str()
+                    {
+                        self.token = path.into();
+                    }
+                    if v["event"] == "error" {
+                        self.job_error = v["hint"].as_str().map(str::to_string);
+                    }
                     if let Some(d) = Device::from_event(&v) {
                         self.devices.push(d);
                         if self.selected.is_none() {
@@ -344,13 +398,40 @@ impl App {
                             self.failed = false;
                             self.status = format!("{} completed.", self.job_name);
                             self.stage = "Complete".into();
+                            if self.job_name == "Detect Wallet card" {
+                                if self.cards.len() == 1 && !self.discovery.cancelled {
+                                    self.card_hash = self.cards[0].clone();
+                                }
+                                self.status = self.discovery.result(self.cards.len());
+                                self.stage = if self.discovery.cancelled {
+                                    "Detection stopped"
+                                } else if self.cards.is_empty() {
+                                    "No card detected"
+                                } else {
+                                    "Card detected"
+                                }
+                                .into();
+                            } else if self.job_name == "Set up sync token" {
+                                self.status = "Sync token ready and selected. It will be reused next time. Close Wallet and Books before applying.".into();
+                            }
                             if let Some(c) = self.restore_review.take() {
                                 self.pending = Some(c);
                             }
                         }
                         Err(e) => {
                             self.failed = true;
-                            self.status = e;
+                            self.status = self.job_error.take().unwrap_or(e);
+                            if self.job_name == "Detect Wallet card" {
+                                if self.discovery.finished && self.discovery.lines == 0 {
+                                    self.status = self.discovery.result(0);
+                                } else {
+                                    self.status = "Card detection could not finish. Unlock and reconnect your iPhone, check trust/pairing, then refresh devices. See Details for the connection error.".into();
+                                }
+                                self.discovery.finished = true;
+                                self.discovery.listening = false;
+                                self.discovery.failure = Some(self.status.clone());
+                                self.stage = "Detection stopped".into();
+                            }
                             self.restore_review = None;
                         }
                     }
@@ -545,6 +626,7 @@ impl App {
         if previous != self.chosen() {
             self.cards.clear();
             self.card_hash.clear();
+            self.discovery = Discovery::default();
         }
         let paired = self.chosen().is_some_and(|d| d.paired);
         if let Some(d) = self.chosen() {
@@ -555,28 +637,27 @@ impl App {
                 if d.paired { "Paired" } else { &d.status }
             ));
         }
-        ui.label(
-            "Open Wallet and select the intended card while scanning. Select its identifier below.",
-        );
-        if ui
-            .add_enabled(paired, egui::Button::new("Scan Wallet / 20 s"))
-            .clicked()
+        ui.label("Card detection starts automatically. When prompted, open Wallet on your iPhone and tap the intended card.");
+        if self.discovery.finished {
+            ui.label(self.discovery.result(self.cards.len()));
+        }
+        if !paired {
+            ui.label("Connect and unlock your iPhone, establish trust with this computer, then refresh devices. USB is recommended for setup.");
+        }
+        if self.discovery.started
+            && ui
+                .add_enabled(paired, egui::Button::new("Detect card again"))
+                .clicked()
         {
-            self.cards.clear();
-            self.card_hash.clear();
-            self.device_job(
-                "Scan Wallet",
-                vec![
-                    "scan".into(),
-                    "--duration".into(),
-                    "20".into(),
-                    "--show-hashes".into(),
-                ],
-            );
+            self.detect_card();
         }
         egui::ComboBox::from_id_salt("card-select")
             .selected_text(if self.card_hash.is_empty() {
-                "Choose detected card"
+                if self.cards.is_empty() {
+                    "Waiting for a card identifier"
+                } else {
+                    "Choose detected card"
+                }
             } else {
                 &self.card_hash
             })
@@ -594,7 +675,24 @@ impl App {
         if ui.button("Choose new backup path…").clicked() {
             self.picker(Field::Snapshot, true);
         }
-        self.path_row(ui, "Private sync token", Field::Token, false);
+        ui.label(RichText::new("Sync token").strong());
+        ui.label(if self.token.is_empty() {
+            "Fetched automatically from a pinned public GitHub source after a card is selected, then saved privately on this computer."
+        } else {
+            "Token selected. Saved setup tokens are reused on future launches."
+        });
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Get sync token automatically").clicked() {
+                self.setup_token();
+            }
+            ui.hyperlink_to(
+                "Token setup help",
+                "https://github.com/hoicau/AirCard-Linux/blob/main/docs/SYNC-TOKEN.md",
+            );
+        });
+        ui.collapsing("Use an existing token / show path", |ui| {
+            self.path_row(ui, "Private 84-byte token file", Field::Token, false);
+        });
         ui.label(RichText::new("Recovery directory").strong());
         ui.add(
             egui::TextEdit::singleline(&mut self.journal)
@@ -628,7 +726,11 @@ impl App {
         ui.label(RichText::new("Keep backups until you no longer need Restore. Keep interrupted recovery directories until recovery succeeds.").small().weak());
     }
     fn help(&self, ui: &mut egui::Ui) {
-        title(ui, "AirCard Linux", "Wallet card artwork / version 0.1.0");
+        title(
+            ui,
+            "AirCard Linux",
+            concat!("Wallet card artwork / version ", env!("CARGO_PKG_VERSION")),
+        );
         for (heading, body) in [
             (
                 "Prepare",
@@ -636,7 +738,11 @@ impl App {
             ),
             (
                 "Apply",
-                "Select your paired iPhone, scan the intended Wallet card and choose a new private backup and recovery directory. Review the target and confirm.",
+                "Select your paired iPhone. Detection starts automatically; wait for the prompt, then open Wallet and tap the intended card. A single detected identifier is filled in for review. Choose a new private backup and recovery directory.",
+            ),
+            (
+                "Sync token",
+                "After a card is selected, AirCard downloads the compatibility token from a pinned public GitHub source, checks its integrity and stores it privately for reuse. You can also choose an existing 84-byte token. No Apple Account login is needed. Compatibility still depends on iOS.",
             ),
             (
                 "Recover",
@@ -731,18 +837,36 @@ impl App {
         if smoke.frames == 0 {
             smoke.started = Instant::now();
             let phase = smoke.phase;
-            self.dark = matches!(phase, 1 | 4);
+            self.dark = matches!(phase, 1 | 4 | 7);
             self.tab = match phase {
                 2 => Tab::Help,
-                3 | 4 => Tab::Device,
+                3 | 4 | 6..=8 => Tab::Device,
                 _ => Tab::Artwork,
             };
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(if phase == 5 {
-                Vec2::new(700.0, 540.0)
-            } else {
-                Vec2::new(1080.0, 780.0)
-            }));
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(
+                if matches!(phase, 5 | 8) {
+                    Vec2::new(700.0, 540.0)
+                } else {
+                    Vec2::new(1080.0, 780.0)
+                },
+            ));
             self.style(ctx);
+            if phase == 6 {
+                self.discovery.begin();
+                self.discovery.listening = true;
+                self.discovery.remaining = 45;
+                self.card_hash.clear();
+                self.token.clear();
+                self.stage = "Waiting for Wallet".into();
+                self.status = "Now open Wallet on your iPhone and tap the intended card. Detection ends automatically when an identifier appears (45 s left).".into();
+            }
+            if phase == 7 {
+                self.discovery.listening = false;
+                self.discovery.finished = true;
+                self.discovery.lines = 100;
+                self.stage = "No card detected".into();
+                self.status = self.discovery.result(0);
+            }
             if phase == 4 {
                 self.review("Apply card artwork", "Replace the selected card background and save its original artwork in a private backup. This is a UI fixture; no device operation will run.", vec!["card-apply".into(), "synthetic.png".into(), "--backup".into(), "card-backup.json".into(), "--journal".into(), "recovery".into(), "--card-hash".into(), "fixture-card-identifier".into()]);
             }
@@ -807,6 +931,19 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll(ctx);
+        if self.tab == Tab::Device
+            && !self.busy()
+            && self.pending.is_none()
+            && self.smoke.is_none()
+            && !self.close_when_idle
+            && self.chosen().is_some_and(|d| d.paired)
+        {
+            if !self.discovery.started {
+                self.detect_card();
+            } else if !self.card_hash.is_empty() && self.token.is_empty() && !self.token_attempted {
+                self.setup_token();
+            }
+        }
         self.smoke_before(ctx);
         if ctx.input(|i| i.viewport().close_requested()) && self.busy() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
@@ -927,6 +1064,15 @@ impl eframe::App for App {
                         });
                     });
             });
+        // Repaint once after navigation or a device change so automatic setup can start.
+        if self.tab == Tab::Device
+            && !self.busy()
+            && !self.discovery.started
+            && self.chosen().is_some_and(|d| d.paired)
+            && self.smoke.is_none()
+        {
+            ctx.request_repaint();
+        }
         self.confirmation(ctx);
         if self.details {
             egui::Window::new("Operation details / identifiers redacted")
@@ -971,4 +1117,64 @@ fn empty_preview(ui: &mut egui::Ui, heading: &str, description: &str) {
             ui.label(RichText::new(heading).size(22.0));
             ui.label(RichText::new(description).weak());
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, atomic::AtomicBool};
+
+    #[test]
+    fn discovery_fills_only_a_single_successful_candidate() {
+        let hashes = [
+            "AAoUHigyPEZQWmRueIKMlqCqtL4=",
+            "AAsWISw3Qk1YY255hI+apbC7xtE=",
+        ];
+        for (count, cancelled) in [(0, false), (1, false), (2, false), (1, true)] {
+            let mut app = App::empty(PathBuf::new(), false);
+            let (tx, receiver) = mpsc::sync_channel(16);
+            app.job = Some(worker::Job {
+                receiver,
+                cancel: Arc::new(AtomicBool::new(false)),
+            });
+            app.job_name = "Detect Wallet card".into();
+            app.discovery.begin();
+            for hash in &hashes[..count] {
+                tx.send(Message::Event(
+                    serde_json::json!({"event":"card_match","hash":hash}),
+                ))
+                .unwrap();
+            }
+            tx.send(Message::Event(
+                serde_json::json!({"event":"syslog_complete","lines":10,"cancelled":cancelled}),
+            ))
+            .unwrap();
+            tx.send(Message::Finished(Ok(()))).unwrap();
+            app.poll(&egui::Context::default());
+            assert_eq!(app.cards.len(), count);
+            assert_eq!(!app.card_hash.is_empty(), count == 1 && !cancelled);
+            assert!(app.job.is_none());
+        }
+    }
+
+    #[test]
+    fn token_download_error_keeps_actionable_hint_and_existing_selection() {
+        let mut app = App::empty(PathBuf::new(), false);
+        app.token = "existing-token.bin".into();
+        let (tx, receiver) = mpsc::sync_channel(4);
+        app.job = Some(worker::Job {
+            receiver,
+            cancel: Arc::new(AtomicBool::new(false)),
+        });
+        app.job_name = "Set up sync token".into();
+        tx.send(Message::Event(
+            serde_json::json!({"event":"error","hint":"Check connection and retry setup."}),
+        ))
+        .unwrap();
+        tx.send(Message::Finished(Err("exit 1".into()))).unwrap();
+        app.poll(&egui::Context::default());
+        assert_eq!(app.token, "existing-token.bin");
+        assert_eq!(app.status, "Check connection and retry setup.");
+        assert!(app.failed);
+    }
 }

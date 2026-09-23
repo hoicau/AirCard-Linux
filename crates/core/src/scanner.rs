@@ -15,40 +15,6 @@ pub fn is_valid_card_hash(h: &str) -> bool {
         return false;
     }
 
-    // Reject strings with multiple underscores or hyphens (typical of system asset/bundle names)
-    if trimmed.chars().filter(|&c| c == '_').count() > 1
-        || trimmed.chars().filter(|&c| c == '-').count() > 2
-    {
-        return false;
-    }
-
-    // Reject obvious system identifiers, bundle IDs and common keywords
-    let lower = trimmed.to_lowercase();
-    if lower.contains("mobileasset")
-        || lower.contains("com_apple")
-        || lower.contains("com.")
-        || lower.contains("apple.")
-        || lower.contains("curtain")
-        || lower.contains("binder")
-        || lower.contains("optimizer")
-        || lower.contains("system")
-        || lower.contains("uaf")
-        || lower.contains("siri")
-        || lower.contains("dialog")
-        || lower.contains("planner")
-        || lower.contains("linguistic")
-        || lower.contains("timing")
-        || lower.contains("model")
-        || lower.contains("translation")
-        || lower.contains("visual")
-        || lower.contains("device")
-        || lower.contains("override")
-        || lower.contains("motion")
-        || lower.contains("search")
-    {
-        return false;
-    }
-
     // '=' can only appear at the end
     if let Some(pos) = trimmed.find('=')
         && pos < len - 2
@@ -124,37 +90,81 @@ use std::sync::LazyLock;
 
 static CARD_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     vec![
-        Regex::new(r"/(?:Cards|Passes/Cards)/([A-Za-z0-9+/_-]{27,44})(?:\.pkpass|\.cache|\.pkcache|/|\s|\x22|'|\)|,|$)").unwrap(),
-        Regex::new(r"/([A-Za-z0-9+/_-]{27,44})\.(?:pkpass|cache|pkcache)").unwrap(),
-        Regex::new(r"(?:^|[^A-Za-z0-9+/_-])([A-Za-z0-9+/_-]{27}=)(?:$|[^A-Za-z0-9+/_-])").unwrap(),
-        Regex::new(r"(?i)(?:card[_\s]?(?:hash|id)|pass[_\s]?(?:hash|id)|unique[_\s]?id)\s*[:=]\s*['\x22]?([A-Za-z0-9+=_-]{27,44})").unwrap(),
+        Regex::new(r"(?i)/(?:Cards|Passes/Cards)/([A-Za-z0-9+/_-]{27,43}=?)(?:\.pkpass|\.cache|\.pkcache|/|\s|\x22|'|\)|,|$)").unwrap(),
+        Regex::new(r"/([A-Za-z0-9+/_-]{27,43}=?)\.(?:pkpass|cache|pkcache)").unwrap(),
+        Regex::new(r"(?:^|[^A-Za-z0-9+/_=-])((?:[A-Za-z0-9+/_-]{27}|[A-Za-z0-9+/_-]{43})=)(?:$|[^A-Za-z0-9+/_=-])").unwrap(),
+        Regex::new(r"(?i)(?:card[_\s]?(?:hash|id)|pass[_\s]?(?:hash|id)|unique[_\s]?id)\s*[:=]\s*['\x22]?([A-Za-z0-9+/_-]{27,43}=?)(?:$|[^A-Za-z0-9+/_=-])").unwrap(),
     ]
 });
 
-pub fn extract_card_hash_from_line(line: &str) -> Option<String> {
+pub fn extract_card_hashes_from_line(line: &str) -> Vec<String> {
     let lower = line.to_lowercase();
-    let has_wallet = WALLET_KEYWORDS.iter().any(|k| lower.contains(k));
-    if !has_wallet {
-        return None;
+    if !WALLET_KEYWORDS.iter().any(|k| lower.contains(k)) {
+        return Vec::new();
     }
-
-    for r in CARD_REGEXES.iter() {
-        if let Some(caps) = r.captures(line)
-            && let Some(m) = caps.get(1)
-        {
-            let h = m
-                .as_str()
-                .trim()
-                .trim_matches(['\'', '"'])
-                .trim_end_matches(['.', ',']);
-            if is_valid_card_hash(h) {
-                let mut norm = h.to_string();
-                if norm.len() == 27 {
-                    norm.push('=');
+    let mut hashes = Vec::new();
+    for regex in CARD_REGEXES.iter() {
+        for caps in regex.captures_iter(line) {
+            let hash = caps.get(1).expect("hash capture").as_str();
+            if is_valid_card_hash(hash) {
+                let mut normalized = hash.to_string();
+                if matches!(normalized.len(), 27 | 43) {
+                    normalized.push('=');
                 }
-                return Some(norm);
+                if !hashes.contains(&normalized) {
+                    hashes.push(normalized);
+                }
             }
         }
     }
-    None
+    hashes
+}
+
+pub fn extract_card_hash_from_line(line: &str) -> Option<String> {
+    extract_card_hashes_from_line(line).into_iter().next()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::{
+        Engine,
+        engine::general_purpose::{STANDARD, URL_SAFE},
+    };
+
+    #[test]
+    fn detects_padded_and_unpadded_sha1_and_sha256_paths_and_labels() {
+        for size in [20, 32] {
+            let bytes: Vec<_> = (0..size).map(|i| (i * 11) as u8).collect();
+            for engine in [STANDARD, URL_SAFE] {
+                let hash = engine.encode(&bytes);
+                for candidate in [hash.as_str(), hash.trim_end_matches('=')] {
+                    for line in [
+                        format!("passd /Cards/{candidate}.pkpass"),
+                        format!("Wallet card_id='{candidate}'"),
+                    ] {
+                        assert_eq!(
+                            extract_card_hashes_from_line(&line),
+                            vec![hash.clone()],
+                            "{line}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn does_not_lose_later_candidates_or_reject_url_safe_alphabet() {
+        let first = URL_SAFE.encode((0..20).map(|i| (i * 13 + 191) as u8).collect::<Vec<_>>());
+        let second = URL_SAFE.encode((0..32).map(|i| (i * 17 + 251) as u8).collect::<Vec<_>>());
+        let line = format!(
+            "passd /Cards/AAAAAAAAAAAAAAAAAAAAAAAAAAA=.pkpass /Cards/{first}.pkpass /Cards/{second}.pkpass"
+        );
+        let hashes = extract_card_hashes_from_line(&line);
+        assert_eq!(hashes, vec![first, second]);
+        assert!(
+            extract_card_hashes_from_line("Wallet card_id=AAAAAAAAAAAAAAAAAAAAAAAAAAA=").is_empty()
+        );
+    }
 }

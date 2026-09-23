@@ -32,12 +32,23 @@ and checksums; use a build compatible with your distribution's glibc and native 
 
 1. Connect and unlock your own already paired iPhone. Keep Books closed.
 2. In **Card artwork**, open PNG/JPEG/WebP and prepare the centered 1536 × 969 preview.
-3. In **Apply & restore**, select the device and transport. Start a scan, then open Wallet
-   and select the intended card. Choose its detected identifier and close Wallet.
-4. Choose a **new backup file**, an **unused recovery directory**, and your private
-   84-byte sync token. [Token setup](docs/SYNC-TOKEN.md) describes the public implementation
-   used for compatibility testing; the application does not fetch or distribute a token table.
+3. In **Apply & restore**, select the device and transport. Card detection starts automatically.
+   Wait for **Waiting for Wallet**, then open Wallet on your iPhone and tap the intended card.
+   A single detected identifier is filled in automatically; multiple results require a choice.
+   Check the target and close Wallet. Detection stops after a match or 60 seconds.
+4. The sync token is downloaded automatically after a card is selected and saved privately
+   for future launches. **Get sync token automatically** also works for Restore/Recover;
+   **Use an existing token / show path** lets you choose your own file. Internet access,
+   `curl` and `ca-certificates` are needed for first-time setup. See [token setup](docs/SYNC-TOKEN.md).
+   Choose a **new backup file** and an **unused recovery directory**.
 5. Review the target card and device, then confirm Apply. Reopen Wallet after completion.
+
+Detection reads Wallet activity from iPhone logs; it does not enumerate every stored card.
+If no identifier appears, return to Wallet's card list, click **Detect card again**, wait
+for the prompt and reopen the intended card. If no logs arrive, unlock/reconnect over USB
+and refresh devices. Some cards or iOS versions may hide identifiers. Linux cannot open
+Wallet or select a card for you. A detected identifier can also come from background Wallet
+activity, so verify the target before applying; retry with only the intended card open if unsure.
 
 AirCard replaces existing background resources only: `cardBackgroundCombined@3x.png`,
 `cardBackgroundCombined@2x.png` and `cardBackgroundCombined.pdf`. It invalidates the
@@ -74,6 +85,7 @@ unless explicitly requested. Commands emit newline-delimited JSON with stage and
 ./target/release/aircard prepare-card artwork.png --preview preview.png
 
 mkdir -p .local
+./target/release/aircard setup-token --output .local/token.bin
 # Validate the plan offline first; add --apply to perform it.
 ./target/release/aircard card-apply artwork.png --card-hash '<HASH>' \
   --backup .local/card-original.json --journal .local/card-transaction \
@@ -120,7 +132,7 @@ cargo build --locked --workspace --release
 Publishing a GitHub Release (including a prerelease) runs the `ubuntu-latest` checks
 with latest stable Rust and builds from the release commit. After the build passes, the
 release workflow attaches the native `.tar.gz` archive and SHA256 file. The tag must match
-the CLI/GUI version, for example `v0.1.0`. Ordinary pushes and pull requests produce CI artifacts only.
+the CLI/GUI version, for example `v0.1.1`. Ordinary pushes and pull requests produce CI artifacts only.
 
 Core data/image logic is platform-independent. `device` owns the Linux backend,
 `linux-adapter` isolates native FFI, `airtraffic` owns framing/state machines, and CLI/GUI

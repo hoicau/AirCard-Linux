@@ -1,4 +1,58 @@
 use serde_json::Value;
+#[derive(Default)]
+pub struct Discovery {
+    pub started: bool,
+    pub listening: bool,
+    pub remaining: u64,
+    pub lines: u64,
+    pub cancelled: bool,
+    pub finished: bool,
+    pub failure: Option<String>,
+}
+impl Discovery {
+    pub fn begin(&mut self) {
+        *self = Self {
+            started: true,
+            ..Self::default()
+        };
+    }
+    pub fn event(&mut self, event: &Value) {
+        match event["event"].as_str() {
+            Some("service_started") if event["service"] == "com.apple.syslog_relay" => {
+                self.listening = true;
+                self.remaining = 60;
+            }
+            Some("syslog_progress") => {
+                self.remaining = event["remaining_seconds"].as_u64().unwrap_or(0);
+                self.lines = event["lines"].as_u64().unwrap_or(0);
+            }
+            Some("syslog_complete") => {
+                self.finished = true;
+                self.listening = false;
+                self.lines = event["lines"].as_u64().unwrap_or(0);
+                self.cancelled = event["cancelled"].as_bool().unwrap_or(false);
+            }
+            _ => {}
+        }
+    }
+    pub fn result(&self, count: usize) -> String {
+        if self.cancelled {
+            "Card detection stopped. Choose a detected identifier or retry when ready.".into()
+        } else if let Some(message) = &self.failure {
+            message.clone()
+        } else if count == 1 {
+            "Card identifier filled in. Check that you opened the intended card, then close Wallet before applying.".into()
+        } else if count > 1 {
+            format!(
+                "Found {count} card identifiers. Choose the intended card below, or retry while opening only that card."
+            )
+        } else if self.lines == 0 {
+            "No iPhone logs received. Unlock the phone, reconnect USB and refresh devices, then retry.".into()
+        } else {
+            "No card identifier appeared in Wallet logs. Return to the card list, retry detection, then reopen the intended card. Some iOS versions or cards may hide identifiers.".into()
+        }
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Device {
     pub udid: String,
@@ -90,6 +144,25 @@ pub fn redacted(value: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn discovery_distinguishes_ready_empty_no_logs_and_cancelled() {
+        let mut scan = Discovery::default();
+        scan.begin();
+        assert!(!scan.listening);
+        scan.event(
+            &serde_json::json!({"event":"service_started","service":"com.apple.syslog_relay"}),
+        );
+        assert!(scan.listening);
+        scan.event(&serde_json::json!({"event":"syslog_complete","lines":20,"cancelled":false}));
+        assert!(scan.finished && !scan.listening);
+        assert!(scan.result(0).contains("No card identifier"));
+        assert!(scan.result(1).contains("filled in"));
+        assert!(scan.result(2).contains("Choose"));
+        scan.begin();
+        assert!(scan.result(0).contains("No iPhone logs"));
+        scan.event(&serde_json::json!({"event":"syslog_complete","lines":0,"cancelled":true}));
+        assert!(scan.result(0).contains("stopped"));
+    }
     #[test]
     fn confirmations_bind_device_route_and_explicit_consent() {
         let d = Device {

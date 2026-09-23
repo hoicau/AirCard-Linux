@@ -14,7 +14,9 @@ Linux implementation; the upstream source remains available at the pinned link b
 No MobileDevice.dll, AirTrafficHost.dll, private Apple framework or Apple library is loaded,
 bundled, modified or reverse engineered. The public ATC path/link mechanism is implemented
 for explicitly selected card targets. Pairing and requested service TLS remain verified.
-Grappa tokens come from caller-supplied local files; no token table is shipped.
+Grappa tokens come from private local files, either supplied by the caller or created by
+the pinned public-source setup described in [SYNC-TOKEN.md](SYNC-TOKEN.md). No token table
+is shipped in binaries or archives.
 
 ## Linux adapter
 

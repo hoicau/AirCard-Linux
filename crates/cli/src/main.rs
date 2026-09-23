@@ -52,6 +52,12 @@ struct Args {
 }
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Download and privately cache the pinned public sync token. No device required.
+    SetupToken {
+        /// New token file; defaults to the per-user AirCard data directory.
+        #[arg(long)]
+        output: Option<std::path::PathBuf>,
+    },
     /// Offline center crop, PNG preview and Wallet resource ZIP. No output means dry-run.
     PrepareCard {
         input: std::path::PathBuf,
@@ -121,6 +127,9 @@ enum Command {
         duration: u64,
         #[arg(long)]
         show_hashes: bool,
+        /// Stop after receiving candidate card identifiers (used by automatic GUI discovery).
+        #[arg(long)]
+        until_match: bool,
     },
 }
 fn emit(value: &impl serde::Serialize) {
@@ -157,6 +166,7 @@ fn watchdog(args: &Args, cancel: &AtomicBool) -> u8 {
         }
     };
     let seconds = match &args.command {
+        Command::SetupToken { .. } => 35,
         Command::Scan { duration, .. } => *duration + args.timeout + 5,
         Command::CardTest { hold_seconds, .. } => args.timeout * 30 + hold_seconds + 90,
         Command::CardApply { .. } | Command::CardRestore { .. } | Command::CardRecover { .. } => {
@@ -216,6 +226,18 @@ fn watchdog(args: &Args, cancel: &AtomicBool) -> u8 {
     }
 }
 fn run(args: &Args, cancel: &AtomicBool) -> device::Result<u8> {
+    if let Command::SetupToken { output } = &args.command {
+        return Ok(match cli::sync_token::setup(output.as_deref()) {
+            Ok(path) => {
+                emit(&json!({"event":"token_ready","path":path}));
+                0
+            }
+            Err(message) => {
+                emit(&json!({"event":"error","hint":message}));
+                1
+            }
+        });
+    }
     if let Some(code) = resources::run(&args.command)? {
         return Ok(code);
     }
@@ -253,7 +275,9 @@ fn run(args: &Args, cancel: &AtomicBool) -> device::Result<u8> {
     let info = provider.pairing(&selected)?;
     emit(&json!({"event":"paired","info":info}));
     match &args.command {
-        Command::Devices { .. } | Command::PrepareCard { .. } => unreachable!(),
+        Command::Devices { .. } | Command::PrepareCard { .. } | Command::SetupToken { .. } => {
+            unreachable!()
+        }
         Command::CardTest { .. }
         | Command::CardApply { .. }
         | Command::CardRestore { .. }
@@ -277,13 +301,13 @@ fn run(args: &Args, cancel: &AtomicBool) -> device::Result<u8> {
         Command::Scan {
             duration,
             show_hashes,
+            until_match,
         } => capture(
             &provider,
             &selected,
             *duration,
-            false,
-            true,
             *show_hashes,
+            *until_match,
             cancel,
         )?,
     }
@@ -293,9 +317,8 @@ fn capture(
     provider: &impl DeviceProvider,
     selected: &device::Device,
     duration: u64,
-    raw: bool,
-    scan: bool,
     show_hashes: bool,
+    until_match: bool,
     cancel: &AtomicBool,
 ) -> device::Result<()> {
     emit(&json!({"event":"stage","stage":"start_syslog"}));
@@ -310,6 +333,7 @@ fn capture(
     let mut matches = 0;
     let mut last = Instant::now();
     let mut seen = std::collections::BTreeSet::new();
+    let mut first_match = None;
     while start.elapsed() < Duration::from_secs(duration) && !cancel.load(Ordering::Relaxed) {
         let mut buf = [0; 8192];
         match service.receive(&mut buf, 250) {
@@ -323,13 +347,7 @@ fn capture(
                 bytes += n;
                 for line in lines.push(&buf[..n]) {
                     count += 1;
-                    if raw {
-                        println!("{line}");
-                    }
-                    if scan
-                        && let Some(hash) =
-                            aircard_core::scanner::extract_card_hash_from_line(&line)
-                    {
+                    for hash in aircard_core::scanner::extract_card_hashes_from_line(&line) {
                         matches += 1;
                         if seen.len() < 1024 && seen.insert(hash.clone()) {
                             emit(
@@ -353,9 +371,17 @@ fn capture(
                 ));
             }
         }
+        if until_match && !seen.is_empty() {
+            // Collect the rest of the activity burst, including fragmented lines, so
+            // nearby identifiers are offered as choices rather than silently ignored.
+            let first = first_match.get_or_insert_with(Instant::now);
+            if first.elapsed() >= Duration::from_secs(2) {
+                break;
+            }
+        }
         if last.elapsed() >= Duration::from_secs(1) {
             emit(
-                &json!({"event":"syslog_progress","bytes":bytes,"lines":count,"card_matches":matches}),
+                &json!({"event":"syslog_progress","bytes":bytes,"lines":count,"card_matches":matches,"remaining_seconds":duration.saturating_sub(start.elapsed().as_secs())}),
             );
             last = Instant::now();
         }

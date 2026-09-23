@@ -20,7 +20,7 @@ sudo apt-get install build-essential pkg-config curl ca-certificates \
 For compatible native CLI and GUI binaries:
 
 ```sh
-sudo apt-get install libimobiledevice-utils libusbmuxd-tools usbmuxd avahi-utils \
+sudo apt-get install curl ca-certificates libimobiledevice-utils libusbmuxd-tools usbmuxd avahi-utils \
   libx11-6 libxi6 libxcursor1 libxrandr2 libxkbcommon0 libxkbcommon-x11-0 \
   libwayland-client0 libegl1 libgl1 xdg-desktop-portal
 ```
@@ -47,7 +47,7 @@ sudo pacman -S --needed base-devel pkgconf curl ca-certificates \
 Runtime-only installation:
 
 ```sh
-sudo pacman -S --needed libimobiledevice libplist libusbmuxd usbmuxd avahi \
+sudo pacman -S --needed curl ca-certificates libimobiledevice libplist libusbmuxd usbmuxd avahi \
   libx11 libxi libxcursor libxrandr libxkbcommon libxkbcommon-x11 wayland mesa xdg-desktop-portal
 ```
 
@@ -147,7 +147,7 @@ Do not launch the GUI as root. It does not install a daemon or persist device id
 
 ```sh
 ./scripts/package-native.sh
-# Produces dist/aircard-linux-0.1.0-<architecture>.tar.gz and .sha256
+# Produces dist/aircard-linux-0.1.1-<architecture>.tar.gz and .sha256
 ```
 
 Pass an optional label, such as `debian-13`, to distinguish local builds.
@@ -160,7 +160,7 @@ from the extracted directory. Never mix binaries from different releases.
 CI builds on `ubuntu-latest` with latest stable Rust; archive names contain the version and CPU architecture. Publishing a GitHub Release,
 including a prerelease, builds its commit through the same checks and attaches the archive
 and its SHA256 file after the build passes. Use a tag matching the CLI/GUI version, such as
-`v0.1.0`; push and pull-request runs upload CI artifacts only. Failed release runs can be
+`v0.1.1`; push and pull-request runs upload CI artifacts only. Failed release runs can be
 rerun; successful uploads replace assets with the same names. Other distributions can build
 with the guide above. Build availability is not hardware compatibility proof.
 
@@ -199,6 +199,9 @@ Remove only the executables you installed, for example:
 rm "$HOME/.local/bin/aircard" "$HOME/.local/bin/aircard-gui"
 cargo clean
 ```
+
+Automatic token setup stores a private cache in `$XDG_DATA_HOME/aircard`, or
+`~/.local/share/aircard` by default. Remove that directory if you no longer need the token.
 
 AirCard does not install a system service. Delete your own exported previews/card backups and
 redirected logs when no longer needed. Native library and usbmuxd packages may be shared

@@ -48,7 +48,7 @@ dependencies = [
 
 [[package]]
 name = "aircard-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "image",
@@ -63,7 +63,7 @@ dependencies = [
 
 [[package]]
 name = "aircard-linux-adapter"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "cc",
  "pkg-config",
@@ -71,7 +71,7 @@ dependencies = [
 
 [[package]]
 name = "airtraffic"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aircard-core",
  "plist",
@@ -616,7 +616,7 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
 name = "cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aircard-core",
  "airtraffic",
@@ -776,7 +776,7 @@ checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
 
 [[package]]
 name = "device"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aircard-core",
  "aircard-linux-adapter",
@@ -1355,7 +1355,7 @@ dependencies = [
 
 [[package]]
 name = "gui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aircard-core",
  "clap",

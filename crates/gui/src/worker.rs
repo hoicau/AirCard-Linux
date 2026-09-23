@@ -53,6 +53,7 @@ fn run(
     } else {
         match args.first().map(String::as_str) {
             Some("devices") => "devices_complete",
+            Some("setup-token") => "token_ready",
             Some("scan") => "syslog_complete",
             Some("probe") => "probe_complete",
             Some("card-apply" | "card-restore") => "card_operation_complete",
