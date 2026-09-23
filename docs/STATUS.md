@@ -52,7 +52,8 @@ These checks verify bytes and cleanup; visual appearance was not reaccepted in t
 Only a USB route was exposed during device discovery; Wi-Fi writes were not tested.
 
 Default-location tests cover unique private paths, no creation before confirmation,
-separate new outputs and existing restore inputs, device isolation, restart discovery,
+separate new outputs and existing restore inputs, device/card isolation, switching cards,
+restart discovery and recovery discovery across all cards and the previous directory layout,
 retained recovery after failure and removal after successful recovery. Backup diagnostics
 cover missing paths, directories, symbolic links, permissions, size and invalid contents.
 

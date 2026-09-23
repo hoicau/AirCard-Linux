@@ -81,7 +81,7 @@ pub struct App {
     recovery: String,
     automatic_paths: bool,
     storage: Option<Storage>,
-    storage_device: Option<String>,
+    storage_selection: Option<(String, String)>,
     planned_paths: Option<Paths>,
     active_backup: Option<String>,
     active_recovery: Option<String>,
@@ -187,7 +187,7 @@ impl App {
             recovery: String::new(),
             automatic_paths: true,
             storage: None,
-            storage_device: None,
+            storage_selection: None,
             planned_paths: None,
             active_backup: None,
             active_recovery: None,
@@ -285,22 +285,29 @@ impl App {
         if self.automatic_paths
             && let (Some(storage), Some(device)) = (&self.storage, self.chosen())
         {
-            let paths = storage.fresh(&device.udid);
+            let paths = storage.fresh(
+                &device.udid,
+                (!self.card_hash.is_empty()).then_some(self.card_hash.as_str()),
+            );
             self.backup_output = paths.backup.to_string_lossy().into_owned();
             self.journal = paths.recovery.to_string_lossy().into_owned();
             self.planned_paths = Some(paths);
         }
     }
     fn sync_saved_paths(&mut self) {
-        let device = self.chosen().map(|d| d.udid);
-        if device == self.storage_device || self.storage.is_none() {
+        let selection = self.chosen().map(|d| (d.udid, self.card_hash.clone()));
+        if selection == self.storage_selection || self.storage.is_none() {
             return;
         }
-        self.storage_device = device.clone();
+        self.storage_selection = selection.clone();
         self.snapshot.clear();
         self.recovery.clear();
-        if let Some(device) = device {
-            let (backup, recovery) = self.storage.as_ref().unwrap().recent(&device);
+        if let Some((device, card)) = selection {
+            let (backup, recovery) = self
+                .storage
+                .as_ref()
+                .unwrap()
+                .recent(&device, (!card.is_empty()).then_some(card.as_str()));
             self.snapshot = backup.map_or_else(String::new, |p| p.to_string_lossy().into_owned());
             self.recovery = recovery.map_or_else(String::new, |p| p.to_string_lossy().into_owned());
             self.renew_save_paths();
@@ -600,6 +607,9 @@ impl App {
                                 self.stage = "Detection stopped".into();
                             }
                             self.restore_review = None;
+                            if self.job_name == "Validate backup" {
+                                self.renew_save_paths();
+                            }
                         }
                     }
                     self.finish_save_paths();
@@ -612,6 +622,9 @@ impl App {
             self.status =
                 "CLI monitor stopped unexpectedly. Inspect recovery status before retrying.".into();
             self.finish_save_paths();
+            if self.restore_review.take().is_some() {
+                self.renew_save_paths();
+            }
         }
         let result = self.local.as_ref().and_then(|rx| match rx.try_recv() {
             Ok(r) => Some(r),
@@ -891,7 +904,7 @@ impl App {
             if ui.checkbox(&mut self.automatic_paths, "Choose save locations automatically").changed() {
                 self.renew_save_paths();
             }
-            ui.label("Each Apply or Restore gets a fresh folder under your local AirCard data directory. Existing backups are kept.");
+            ui.label("Backups are grouped by iPhone and card. Each operation gets a fresh folder; previous backups are kept.");
             ui.add_enabled_ui(!self.automatic_paths, |ui| {
                 self.path_row(ui, "New backup file for Apply", Field::BackupOutput, true);
                 ui.label("New recovery folder for Apply or Restore");
@@ -942,9 +955,18 @@ impl App {
             .default_open(recovery_pending)
             .open(if recovery_pending { Some(true) } else { self.smoke.as_ref().map(|s| s.phase == 10) })
             .show(ui, |ui| {
-                ui.label("Restore returns the card saved in a backup to its previous artwork. The latest backup for this iPhone is selected automatically; you can choose an older one.");
+                ui.label("Restore returns a card to its saved artwork. Select a card to find its latest backup, or Browse for an older or imported backup.");
                 self.path_row(ui, "Existing backup to restore", Field::Snapshot, false);
                 if ui.add_enabled(ready && !self.snapshot.trim().is_empty(), egui::Button::new("Review restore…")).clicked() {
+                    // An imported backup can belong to a different card from the current selection.
+                    // Restore journals therefore use a separate device-level scope.
+                    let mut common = common;
+                    if self.automatic_paths && let (Some(storage), Some(device)) = (&self.storage, self.chosen()) {
+                        let paths = storage.fresh(&device.udid, None);
+                        self.journal = paths.recovery.to_string_lossy().into_owned();
+                        common[1] = self.journal.clone();
+                        self.planned_paths = Some(paths);
+                    }
                     let mut args = vec!["card-restore".into(), self.snapshot.trim().into()]; args.extend(common);
                     self.restore_review = self.chosen().map(|device| Confirmation { title: "Restore card artwork".into(), summary: "Restore the card saved in this backup on its original device. Keep Wallet and Books closed.".into(), device, args: args.clone(), accepted:false });
                     self.start("Validate backup", args);
@@ -1088,6 +1110,8 @@ impl App {
             self.start(&c.title, args);
         } else if !dismiss {
             self.pending = Some(c);
+        } else {
+            self.renew_save_paths();
         }
     }
     fn smoke_before(&mut self, ctx: &egui::Context) {
@@ -1407,6 +1431,7 @@ mod tests {
             status: "paired_session_verified".into(),
         });
         app.selected = Some(0);
+        app.card_hash = "fixture-card-a".into();
         app.sync_saved_paths();
         assert!(!app.backup_output.is_empty() && !app.journal.is_empty());
         assert!(app.snapshot.is_empty() && app.recovery.is_empty());
@@ -1442,9 +1467,25 @@ mod tests {
         reopened.storage = Some(Storage::at(root));
         reopened.devices = app.devices.clone();
         reopened.selected = Some(0);
+        reopened.card_hash = app.card_hash.clone();
         reopened.sync_saved_paths();
         assert_eq!(reopened.snapshot, app.snapshot);
         assert_eq!(reopened.recovery, app.recovery);
+        reopened.card_hash = "fixture-card-b".into();
+        reopened.sync_saved_paths();
+        assert!(reopened.snapshot.is_empty());
+        assert_eq!(
+            reopened.recovery, app.recovery,
+            "Another card must not hide an unfinished operation"
+        );
+        let other_paths = reopened.planned_paths.as_ref().unwrap();
+        assert_ne!(
+            paths.backup.parent().unwrap().parent(),
+            other_paths.backup.parent().unwrap().parent()
+        );
+        reopened.card_hash = app.card_hash.clone();
+        reopened.sync_saved_paths();
+        assert_eq!(reopened.snapshot, app.snapshot);
         std::fs::remove_dir(&paths.recovery).unwrap();
         reopened.job_writes = true;
         reopened.active_recovery = Some(reopened.recovery.clone());

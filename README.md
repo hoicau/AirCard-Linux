@@ -70,17 +70,22 @@ the writable target set. The GUI rejects an image changed after preview approval
 ## Restore and recover
 
 The GUI saves operations under `$XDG_DATA_HOME/aircard/operations`, or
-`~/.local/share/aircard/operations` by default. Each operation has a private, unique folder.
+`~/.local/share/aircard/operations` by default. Apply backups are grouped by iPhone and
+card, with a private, unique subfolder for each operation. Device and card directory names
+use SHA-256 digests; raw identifiers are not used as path names.
 Backups keep the previous artwork; recovery folders hold the progress and originals needed
 after an interruption. Recovery folders disappear after successful cleanup; backups remain.
 
-In **Restore or recover**, **Restore** selects the latest backup saved here for the current
-iPhone. Browse to choose an older backup. A new recovery path is generated automatically.
+In **Restore or recover**, **Restore** selects the latest backup for the current iPhone
+and selected card. Switching cards refreshes this selection. Browse to choose an older
+or imported backup, including backups from the previous device-only directory layout.
+Existing files stay in their original locations. A new recovery path is generated automatically.
 Close Wallet and Books, review the restore plan and confirm. Reopen Wallet when complete.
 Keep the backup until you no longer need to restore that artwork.
 
 **Recover** resumes an interrupted operation from its existing recovery directory, selected
-automatically for operations saved here, including after restarting the GUI. Keep
+automatically across all cards on the selected iPhone, including after restarting the GUI.
+Restore journals and journals from the previous layout are also discovered. Keep
 that directory when a device disconnects or recovery fails. Reconnect the original device,
 unlock it, close Wallet/Books and run Recover before another operation. Recovery rolls back
 an unfinished apply. If application and durable backup already completed, it finishes

@@ -211,9 +211,18 @@ records transaction progress and original data for Recover after an interruption
 Planning or cancelling a confirmation does not create these files. The CLI creates the
 backup and journal when it runs; successful cleanup removes the journal, keeping the backup.
 
+Apply uses `operations/<device-digest>/cards/<card-digest>/<operation>/backup.json`,
+with its recovery journal beside the backup. Repeated changes to the same card keep separate
+operation folders under that card. Restore uses `operations/<device-digest>/restores/<operation>`
+because a manually selected backup can refer to a different card from the detected one.
+The digests are SHA-256 hashes, so raw device/card identifiers never become path names.
+
 **Advanced save locations** displays the generated paths and allows manual overrides.
-**Restore or recover** offers the latest backup and unfinished operation for the selected
-iPhone, rediscovered after restart. Use Browse for older backups or custom locations.
+**Restore or recover** offers the latest backup for the selected iPhone and card, refreshed
+when either selection changes. Unfinished operations are discovered across all cards on
+the iPhone and remain visible while switching cards. Both are rediscovered after restart.
+Backups from the previous layout remain in place and can be selected with Browse; their
+unfinished recovery directories are still detected automatically. Use Browse for custom locations.
 Explanations are shown as wrapping text outside path fields. Restore requires an existing
 backup from Apply; a new filename, image, exported ZIP or recovery folder is not a backup.
 Private files must have no group/other access; `chmod 600` sets the expected file permissions.

@@ -1,4 +1,4 @@
-//! Private, per-device operation folders. Only confirmed operations create directories.
+//! Private operation folders grouped by device and card. Only confirmed operations create directories.
 use std::{
     os::unix::fs::{DirBuilderExt, MetadataExt},
     path::{Path, PathBuf},
@@ -13,6 +13,7 @@ pub struct Storage {
 pub struct Paths {
     pub backup: PathBuf,
     pub recovery: PathBuf,
+    card_key: Option<String>,
 }
 impl Storage {
     #[cfg(test)]
@@ -30,13 +31,20 @@ impl Storage {
             .join("operations")
             .join(aircard_core::sha256(udid.as_bytes()))
     }
-    pub fn fresh(&self, udid: &str) -> Paths {
+    fn scope_dir(&self, udid: &str, card_key: Option<&str>) -> PathBuf {
+        match card_key {
+            Some(key) => self.device_dir(udid).join("cards").join(key),
+            None => self.device_dir(udid).join("restores"),
+        }
+    }
+    pub fn fresh(&self, udid: &str, card: Option<&str>) -> Paths {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let directory = self.device_dir(udid).join(format!(
+        let card_key = card.map(|hash| aircard_core::sha256(hash.as_bytes()));
+        let directory = self.scope_dir(udid, card_key.as_deref()).join(format!(
             "{time:032}-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
@@ -44,9 +52,10 @@ impl Storage {
         Paths {
             backup: directory.join("backup.json"),
             recovery: directory.join("recovery"),
+            card_key,
         }
     }
-    pub fn recent(&self, udid: &str) -> (Option<PathBuf>, Option<PathBuf>) {
+    pub fn recent(&self, udid: &str, card: Option<&str>) -> (Option<PathBuf>, Option<PathBuf>) {
         let device = self.device_dir(udid);
         if [&self.root, &self.root.join("operations"), &device]
             .iter()
@@ -54,28 +63,37 @@ impl Storage {
         {
             return (None, None);
         }
-        let Ok(entries) = std::fs::read_dir(device) else {
-            return (None, None);
-        };
-        let mut directories: Vec<_> = entries
+        let backup = card.and_then(|hash| {
+            let scope = self.scope_dir(udid, Some(&aircard_core::sha256(hash.as_bytes())));
+            if !private_dir(&device.join("cards")) {
+                return None;
+            }
+            let mut directories = child_dirs(&scope);
+            directories.sort_unstable();
+            directories
+                .into_iter()
+                .rev()
+                .map(|d| d.join("backup.json"))
+                .find(|p| p.symlink_metadata().is_ok_and(|m| m.is_file()))
+        });
+        // Recovery is device-wide: another card's unfinished sync must still be visible.
+        // Direct children retain recovery discovery for the previous directory layout.
+        let mut directories: Vec<_> = child_dirs(&device)
+            .into_iter()
+            .chain(child_dirs(&device.join("restores")))
+            .chain(
+                child_dirs(&device.join("cards"))
+                    .into_iter()
+                    .flat_map(|d| child_dirs(&d)),
+            )
             .take(10_000)
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .filter(|p| private_dir(p))
             .collect();
-        directories.sort_unstable();
-        let mut backup = None;
+        directories.sort_unstable_by(|a, b| a.file_name().cmp(&b.file_name()));
         let mut recovery = None;
         for directory in directories.into_iter().rev() {
-            let candidate = directory.join("backup.json");
-            if backup.is_none() && candidate.symlink_metadata().is_ok_and(|m| m.is_file()) {
-                backup = Some(candidate);
-            }
             let candidate = directory.join("recovery");
-            if recovery.is_none() && private_dir(&candidate) {
+            if private_dir(&candidate) {
                 recovery = Some(candidate);
-            }
-            if backup.is_some() && recovery.is_some() {
                 break;
             }
         }
@@ -83,11 +101,12 @@ impl Storage {
     }
     pub fn prepare(&self, udid: &str, paths: &Paths) -> Result<(), String> {
         let device = self.device_dir(udid);
+        let scope = self.scope_dir(udid, paths.card_key.as_deref());
         let directory = paths
             .backup
             .parent()
             .ok_or("Invalid automatic backup path.")?;
-        if directory.parent() != Some(device.as_path())
+        if directory.parent() != Some(scope.as_path())
             || paths.recovery != directory.join("recovery")
         {
             return Err("Automatic save locations changed. Review the operation again.".into());
@@ -102,7 +121,16 @@ impl Storage {
                     |_| "Cannot create the local data directory. Choose custom save locations.",
                 )?;
         }
-        for path in [&self.root, &self.root.join("operations"), &device] {
+        let mut parents = vec![
+            self.root.clone(),
+            self.root.join("operations"),
+            device.clone(),
+        ];
+        if paths.card_key.is_some() {
+            parents.push(device.join("cards"));
+        }
+        parents.push(scope);
+        for path in &parents {
             if let Err(e) = std::fs::DirBuilder::new().mode(0o700).create(path)
                 && e.kind() != std::io::ErrorKind::AlreadyExists
             {
@@ -117,6 +145,19 @@ impl Storage {
             .map_err(|_| "Cannot reserve a new save location. Review the operation again.".into())
     }
 }
+fn child_dirs(path: &Path) -> Vec<PathBuf> {
+    if !private_dir(path) {
+        return vec![];
+    }
+    std::fs::read_dir(path)
+        .into_iter()
+        .flatten()
+        .take(10_000)
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| private_dir(p))
+        .collect()
+}
 fn private_dir(path: &Path) -> bool {
     path.symlink_metadata().is_ok_and(|m| {
         m.is_dir() && m.mode() & 0o077 == 0 && m.uid() == nix::unistd::getuid().as_raw()
@@ -127,7 +168,7 @@ fn private_dir(path: &Path) -> bool {
 mod tests {
     use super::*;
     #[test]
-    fn defaults_are_unique_private_and_rediscovered_without_crossing_devices() {
+    fn backups_are_isolated_by_card_and_recovery_remains_device_wide() {
         let root = std::env::temp_dir().join(format!("aircard-storage-{}", std::process::id()));
         struct Clean(PathBuf);
         impl Drop for Clean {
@@ -137,9 +178,18 @@ mod tests {
         }
         let _clean = Clean(root.clone());
         let storage = Storage { root };
-        let first = storage.fresh("phone-a");
-        let next = storage.fresh("phone-a");
+        let first = storage.fresh("phone-a", Some("card-a"));
+        let next = storage.fresh("phone-a", Some("card-a"));
+        let other = storage.fresh("phone-a", Some("card-b"));
         assert_ne!(first.backup, next.backup);
+        assert_eq!(
+            first.backup.parent().unwrap().parent(),
+            next.backup.parent().unwrap().parent()
+        );
+        assert_ne!(
+            first.backup.parent().unwrap().parent(),
+            other.backup.parent().unwrap().parent()
+        );
         assert!(!storage.root.exists(), "Planning must not create files");
         storage.prepare("phone-a", &first).unwrap();
         assert!(!first.backup.exists() && !first.recovery.exists());
@@ -150,17 +200,60 @@ mod tests {
             "Never reuse an operation"
         );
         storage.prepare("phone-a", &next).unwrap();
+        storage.prepare("phone-a", &other).unwrap();
+        cli::local::write_new(&other.backup, b"another card backup").unwrap();
         let reopened = Storage {
             root: storage.root.clone(),
         };
         assert_eq!(
-            reopened.recent("phone-a"),
+            reopened.recent("phone-a", Some("card-a")),
             (Some(first.backup.clone()), Some(first.recovery.clone()))
         );
-        assert_eq!(reopened.recent("phone-b"), (None, None));
+        assert_eq!(reopened.recent("phone-b", Some("card-a")), (None, None));
+        assert_eq!(
+            reopened.recent("phone-a", Some("card-b")),
+            (Some(other.backup), Some(first.recovery.clone()))
+        );
+        assert_eq!(
+            reopened.recent("phone-a", None),
+            (None, Some(first.recovery.clone()))
+        );
+        assert_eq!(
+            reopened.recent("phone-a", Some("new-card")),
+            (None, Some(first.recovery.clone()))
+        );
         std::fs::remove_dir(&first.recovery).unwrap();
-        assert_eq!(reopened.recent("phone-a"), (Some(first.backup), None));
+        assert_eq!(
+            reopened.recent("phone-a", Some("card-a")),
+            (Some(first.backup.clone()), None)
+        );
         std::os::unix::fs::symlink(&first.recovery, &next.recovery).unwrap();
-        assert_eq!(reopened.recent("phone-a").1, None);
+        assert_eq!(reopened.recent("phone-a", Some("card-a")).1, None);
+        let restore = storage.fresh("phone-a", None);
+        storage.prepare("phone-a", &restore).unwrap();
+        cli::local::create_private_directory(&restore.recovery).unwrap();
+        assert_eq!(
+            reopened.recent("phone-a", Some("card-a")).1,
+            Some(restore.recovery.clone())
+        );
+        std::fs::remove_dir(&restore.recovery).unwrap();
+        let legacy = storage.device_dir("phone-a").join("000-legacy-operation");
+        cli::local::create_private_directory(&legacy).unwrap();
+        cli::local::write_new(&legacy.join("backup.json"), b"legacy backup kept in place").unwrap();
+        cli::local::create_private_directory(&legacy.join("recovery")).unwrap();
+        assert_eq!(
+            reopened.recent("phone-a", None),
+            (None, Some(legacy.join("recovery")))
+        );
+        assert!(legacy.join("backup.json").is_file());
+        cli::local::write_new(&next.backup, b"newer backup of card a").unwrap();
+        assert_eq!(
+            reopened.recent("phone-a", Some("card-a")).0,
+            Some(next.backup)
+        );
+        assert!(
+            first.backup.is_file(),
+            "Repeated Apply must keep the earlier backup"
+        );
     }
 }
