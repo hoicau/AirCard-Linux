@@ -1,8 +1,8 @@
 name: Linux native
 on:
   push:
+    branches: ['**']
   pull_request:
-  workflow_call:
 permissions:
   contents: read
 jobs:
@@ -25,25 +25,11 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal --component rustfmt --component clippy
           rustup override set stable
-      - name: Verify release tag matches binary version
-        if: github.event_name == 'release'
-        env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: |
-          python3 - <<'PY'
-          import json, os, subprocess
-          metadata = json.loads(subprocess.check_output([
-              "cargo", "metadata", "--locked", "--no-deps", "--format-version", "1",
-          ]))
-          versions = {p["version"] for p in metadata["packages"] if p["name"] in {"cli", "gui"}}
-          tag = os.environ["RELEASE_TAG"]
-          if versions != {tag.removeprefix("v")}:
-              raise SystemExit(f"Release tag {tag!r} does not match CLI/GUI versions {sorted(versions)}. Update Cargo.toml and Cargo.lock before tagging the release.")
-          PY
       - run: cargo fmt --check
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo test --locked --workspace
       - run: python3 scripts/test-native-bundle.py
+      - run: python3 scripts/test-release-artifact.py
       - run: cargo build --locked --workspace --release
       - name: Native GUI smoke test (synthetic data only)
         run: |

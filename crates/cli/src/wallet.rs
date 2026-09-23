@@ -127,7 +127,7 @@ impl Backup {
     }
 }
 fn read_backup(path: &Path) -> Result<Backup> {
-    let bytes = local::read(path, 520 * 1024 * 1024, true)?;
+    let bytes = local::read_context(path, 520 * 1024 * 1024, true, "card_backup_input")?;
     let b: Backup = serde_json::from_slice(&bytes).map_err(|_| invalid("card_backup_decode"))?;
     b.validate()?;
     Ok(b)
@@ -621,7 +621,7 @@ pub fn run(
             afc.staging_preflight(&StagingPlan {
                 transaction: plan.transaction.clone(),
             })?;
-            emit(&json!({"event":"stage","stage":"preserve_books"}));
+            emit(&json!({"event":"stage","stage":"preserve_catalog"}));
             let books = device::books::capture_stable(&mut afc, &cancelled)?;
             let payloads = if let Some(b) = &restore_backup {
                 b.parts[part].applied.clone()
@@ -665,7 +665,7 @@ pub fn run(
             } else {
                 install(&session, &mut afc, j, &mut file, &cancelled)?;
             }
-            emit(&json!({"event":"stage","stage":"restore_books"}));
+            emit(&json!({"event":"stage","stage":"restore_catalog"}));
             device::books::restore(&mut afc, &j.books, &j.books_plan())?;
         }
         if let Some(path) = backup_path {

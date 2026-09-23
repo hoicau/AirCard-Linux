@@ -12,17 +12,37 @@ pub fn read(path: &Path, limit: usize, private: bool) -> Result<Vec<u8>> {
         .read(true)
         .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
         .open(path)
-        .map_err(|_| Error::new(ErrorKind::InvalidInput, "local_input_open"))?;
+        .map_err(|error| {
+            let (operation, hint) = if error.raw_os_error() == Some(nix::libc::ELOOP) {
+                ("local_input_symlink", "Select the actual file; symbolic links are not accepted.")
+            } else {
+                match error.kind() {
+                    std::io::ErrorKind::NotFound => ("local_input_not_found", "The input file does not exist. Select an existing file."),
+                    std::io::ErrorKind::PermissionDenied => ("local_input_permission_denied", "The input file cannot be opened. Check read permission and access to its parent directories."),
+                    _ => ("local_input_open", "The input file cannot be opened. Check its path and access permissions."),
+                }
+            };
+            input_error(operation, hint)
+        })?;
     let info = file
         .metadata()
         .map_err(|_| Error::new(ErrorKind::InvalidInput, "local_input_stat"))?;
-    if !info.is_file()
-        || info.len() > limit as u64
-        || (private && info.permissions().mode() & 0o077 != 0)
-    {
-        return Err(Error::new(
-            ErrorKind::InvalidInput,
-            "local_input_type_size_or_permissions",
+    if !info.is_file() {
+        return Err(input_error(
+            "local_input_not_file",
+            "Select a regular file, not a directory or special file.",
+        ));
+    }
+    if info.len() > limit as u64 {
+        return Err(input_error(
+            "local_input_size",
+            "The input file exceeds this operation's size limit.",
+        ));
+    }
+    if private && info.permissions().mode() & 0o077 != 0 {
+        return Err(input_error(
+            "local_input_permissions",
+            "The private input file allows group or other-user access. Set its permissions to 0600 (chmod 600).",
         ));
     }
     let mut data = Vec::new();
@@ -31,9 +51,24 @@ pub fn read(path: &Path, limit: usize, private: bool) -> Result<Vec<u8>> {
         .read_to_end(&mut data)
         .map_err(|_| Error::new(ErrorKind::Native, "local_input_read"))?;
     if data.len() > limit {
-        return Err(Error::new(ErrorKind::InvalidInput, "local_input_size"));
+        return Err(input_error(
+            "local_input_size",
+            "The input file exceeds this operation's size limit.",
+        ));
     }
     Ok(data)
+}
+fn input_error(operation: &str, hint: &str) -> Error {
+    let mut error = Error::new(ErrorKind::InvalidInput, operation);
+    error.hint = hint.into();
+    error
+}
+/// Preserve the failure reason while identifying the input without exposing its path.
+pub fn read_context(path: &Path, limit: usize, private: bool, context: &str) -> Result<Vec<u8>> {
+    read(path, limit, private).map_err(|mut error| {
+        error.operation = error.operation.replacen("local_input", context, 1);
+        error
+    })
 }
 /// Persist the parent directory entry before any device mutation can rely on this journal.
 pub fn create_private_directory(path: &Path) -> Result<()> {
@@ -83,7 +118,7 @@ pub fn remove(path: &Path) -> Result<()> {
 }
 pub fn token(path: Option<&Path>) -> Result<Option<Vec<u8>>> {
     path.map(|p| {
-        let bytes = read(p, 84, true)?;
+        let bytes = read_context(p, 84, true, "grappa_token_input")?;
         if bytes.len() != 84 {
             return Err(Error::new(
                 ErrorKind::InvalidInput,

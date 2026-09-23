@@ -33,6 +33,16 @@ install -m644 LICENSE README.md "$stage/$name/"
 mkdir "$stage/$name/docs"
 install -m644 docs/INSTALL.md docs/PROVENANCE.md docs/STATUS.md docs/SYNC-TOKEN.md docs/WALLET-TRANSACTIONS.md docs/AIRTRAFFIC-RESEARCH.md "$stage/$name/docs/"
 python3 scripts/license-notices.py "$stage/$name/THIRD-PARTY-NOTICES.txt"
+python3 - "$stage/$name/BUILD-METADATA.json" "$version" <<'PY'
+import json, subprocess, sys
+from pathlib import Path
+metadata = {
+    "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+    "version": sys.argv[2],
+    "dirty": bool(subprocess.check_output(["git", "status", "--porcelain"], text=True).strip()),
+}
+Path(sys.argv[1]).write_text(json.dumps(metadata, indent=2) + "\n")
+PY
 if "$bundle_native"; then
   python3 scripts/bundle-native.py "$stage/$name"
 fi

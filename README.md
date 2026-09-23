@@ -45,7 +45,7 @@ glibc, TLS/graphics libraries and the usbmuxd service; the archive is not fully 
    for future launches. **Get sync token automatically** also works for Restore/Recover;
    **Use an existing token / show path** lets you choose your own file. Internet access,
    `curl` and `ca-certificates` are needed for first-time setup. See [token setup](docs/SYNC-TOKEN.md).
-   Choose a **new backup file** and an **unused recovery directory**.
+   Backup and recovery paths are generated automatically; **Advanced save locations** lets you override them.
 5. Review the target card and device, then confirm Apply. Reopen Wallet after completion.
 
 Detection reads Wallet activity from iPhone logs; it does not enumerate every stored card.
@@ -69,11 +69,18 @@ the writable target set. The GUI rejects an image changed after preview approval
 
 ## Restore and recover
 
-**Restore** uses the original private backup, the same device, and a new recovery directory.
+The GUI saves operations under `$XDG_DATA_HOME/aircard/operations`, or
+`~/.local/share/aircard/operations` by default. Each operation has a private, unique folder.
+Backups keep the previous artwork; recovery folders hold the progress and originals needed
+after an interruption. Recovery folders disappear after successful cleanup; backups remain.
+
+In **Restore or recover**, **Restore** selects the latest backup saved here for the current
+iPhone. Browse to choose an older backup. A new recovery path is generated automatically.
 Close Wallet and Books, review the restore plan and confirm. Reopen Wallet when complete.
 Keep the backup until you no longer need to restore that artwork.
 
-**Recover** resumes an interrupted operation from its existing recovery directory. Keep
+**Recover** resumes an interrupted operation from its existing recovery directory, selected
+automatically for operations saved here, including after restarting the GUI. Keep
 that directory when a device disconnects or recovery fails. Reconnect the original device,
 unlock it, close Wallet/Books and run Recover before another operation. Recovery rolls back
 an unfinished apply. If application and durable backup already completed, it finishes
@@ -143,10 +150,13 @@ cargo build --locked --workspace --release
 ./scripts/package-native.sh --bundle-native bundled
 ```
 
-Publishing a GitHub Release (including a prerelease) runs the `ubuntu-latest` checks
-with latest stable Rust and builds from the release commit. After the build passes, the
-release workflow attaches the native `.tar.gz` archive and SHA256 file. The tag must match
-the CLI/GUI version, for example `v0.1.2`. Ordinary pushes and pull requests produce CI artifacts only.
+Branch pushes and pull requests run Linux CI. Tag pushes do not rebuild. Publishing a
+GitHub Release (including a prerelease) reuses the successful branch CI artifact for that
+exact commit. It checks the archive checksum, embedded source commit, clean-tree status
+and version before uploading. The tag must match the CLI/GUI version, for example `v0.1.2`.
+Wait for branch CI to pass before publishing; if the artifact expired, rerun that branch
+build. Rerun the release upload after its artifact becomes available. Release uploads never
+start another Linux build.
 
 Core data/image logic is platform-independent. `device` owns the Linux backend,
 `linux-adapter` isolates native FFI, `airtraffic` owns framing/state machines, and CLI/GUI

@@ -21,8 +21,9 @@ One authorized, paired iPhone on iOS 27.0, connected over USB to Manjaro x86_64.
   verified after restore; staging and journal removed.
 - Abrupt interruption: process group killed after installed-artwork readback; a new
   card-recover process restored original bytes and completed cleanup from its durable journal.
-- GUI: six native synthetic views captured and inspected (light/dark, help, apply/restore,
-  explicit confirmation and compact window); device operations run the validated CLI.
+- GUI: twelve native synthetic views captured and inspected, including light/dark,
+  expanded automatic save paths, Restore/Recover guidance and compact windows. Device
+  operations run the validated CLI.
 - Wi-Fi: not accepted on hardware; owner deferred it. No USB fallback is performed.
 
 The Wallet-only release meets the local USB acceptance scope. Wi-Fi, additional cards/OS
@@ -37,9 +38,26 @@ malformed framing, timeout, disconnect, cancellation, ordering, manifest rejecti
 partial batches. Device mocks cover preservation and restoration conflicts. CLI tests cover
 offline dry-run and excluded commands. GUI tests cover confirmation, redaction and supervision.
 
-Local verification passed: 72 tests, `cargo fmt --check`, workspace clippy with warnings
-denied, release build, six GUI captures and native archive launch/allowlist/checksum checks.
+Local verification on 2026-09-23 passed: 89 Rust tests, four Python release/bundle tests,
+`cargo fmt --check`, workspace clippy with warnings denied, release build, twelve GUI
+captures, and native archive checksum/metadata/relocated startup checks.
 
-CI is configured for `ubuntu-latest` with latest stable Rust: fmt, clippy with warnings denied,
-workspace tests, release build, synthetic native GUI captures and allowlisted binary archives.
-Configured checks do not establish that hosted jobs have run or that devices were tested there.
+The connected USB iPhone also passed automatic card detection, device diagnostics, image
+preview/resource export, fresh token setup and cached reuse, controlled card-test with
+automatic restoration, persistent Apply, backup validation, Restore, and abrupt interruption
+after artwork readback followed by a separate Recover. All test journals were removed by
+successful cleanup. At a later optional connectivity recheck, no Apple USB device was
+present and usbmuxd was inactive; no post-test AFC directory-count comparison is claimed.
+These checks verify bytes and cleanup; visual appearance was not reaccepted in this run.
+Only a USB route was exposed during device discovery; Wi-Fi writes were not tested.
+
+Default-location tests cover unique private paths, no creation before confirmation,
+separate new outputs and existing restore inputs, device isolation, restart discovery,
+retained recovery after failure and removal after successful recovery. Backup diagnostics
+cover missing paths, directories, symbolic links, permissions, size and invalid contents.
+
+Branch CI is configured for `ubuntu-latest` with latest stable Rust. Tag pushes do not
+rebuild. Release publishing only reuses an existing successful branch artifact for the
+same commit, checking checksum, source commit, clean-tree status and version. Offline tests
+cover selecting that artifact and rejecting stale, expired, mismatched or altered artifacts.
+The changed hosted release upload still needs its first run after these changes are pushed.

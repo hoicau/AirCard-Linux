@@ -12,23 +12,32 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
-    uses: ./.github/workflows/linux.yml
-
   publish:
-    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: read
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - name: Find successful branch build for the release commit
+        id: build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+        run: python3 scripts/release-artifact.py find
       - name: Download tested native archives
         uses: actions/download-artifact@v4
         with:
           name: aircard-linux
           path: dist
-      - name: Verify checksums
-        working-directory: dist
-        run: sha256sum --check -- *.tar.gz.sha256
+          run-id: ${{ steps.build.outputs.run_id }}
+          github-token: ${{ github.token }}
+      - name: Verify archive checksum, source commit and release version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: python3 scripts/release-artifact.py verify
       - name: Attach binaries and checksums to the published release
         env:
           GH_TOKEN: ${{ github.token }}

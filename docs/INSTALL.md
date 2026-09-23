@@ -190,14 +190,33 @@ builds with Cargo.lock, includes the CLI, GUI, license notices, docs and BUILD-I
 refuses to overwrite an existing archive. It explicitly excludes private device data and
 private JSON evidence. Verify the adjacent checksum before extracting, then run `./aircard-gui`
 from the extracted directory. Never mix binaries from different releases.
-CI builds on `ubuntu-latest` with latest stable Rust; archive names contain the version and CPU architecture. Publishing a GitHub Release,
-including a prerelease, builds its commit through the same checks and attaches the archive
-and its SHA256 file after the build passes. Use a tag matching the CLI/GUI version, such as
-`v0.1.2`; push and pull-request runs upload CI artifacts only. Commit the version and lockfile
-updates before creating the release tag. Rerunning a failed workflow uses the original commit;
-it does not pick up later fixes on the default branch. Publish the release against the corrected
-commit to include those fixes. Successful uploads replace assets with the same names. Other distributions can build
-with the guide above. Build availability is not hardware compatibility proof.
+CI builds branch pushes and pull requests on `ubuntu-latest` with latest stable Rust;
+archive names contain the version and CPU architecture. Tag pushes do not trigger Linux CI.
+Publishing a release downloads the existing successful branch artifact for the exact tagged
+commit, verifies checksums and `BUILD-METADATA.json` (commit, version and clean tree), then
+uploads the archive and SHA256 file. It does not compile or call `linux.yml` again.
+
+Commit the version and lockfile updates, push the branch, wait for its CI to pass, then
+publish the matching tag, such as `v0.1.2`. If the artifact is missing, pending or expired,
+the release upload fails with guidance. Wait or rerun the original branch CI, then rerun
+the release workflow. Rerunning a release uses its original commit; it does not pick up
+later branch changes. Successful uploads replace assets with the same names.
+
+## Automatic backup and recovery locations
+
+The GUI creates a unique private folder for each confirmed Apply or Restore under
+`$XDG_DATA_HOME/aircard/operations` (default `~/.local/share/aircard/operations`). The
+`backup.json` file keeps the original card artwork for Restore. The `recovery/` directory
+records transaction progress and original data for Recover after an interruption.
+Planning or cancelling a confirmation does not create these files. The CLI creates the
+backup and journal when it runs; successful cleanup removes the journal, keeping the backup.
+
+**Advanced save locations** displays the generated paths and allows manual overrides.
+**Restore or recover** offers the latest backup and unfinished operation for the selected
+iPhone, rediscovered after restart. Use Browse for older backups or custom locations.
+Explanations are shown as wrapping text outside path fields. Restore requires an existing
+backup from Apply; a new filename, image, exported ZIP or recovery folder is not a backup.
+Private files must have no group/other access; `chmod 600` sets the expected file permissions.
 
 ## USB and Wi-Fi diagnostics
 
@@ -243,7 +262,8 @@ cargo clean
 ```
 
 Automatic token setup stores a private cache in `$XDG_DATA_HOME/aircard`, or
-`~/.local/share/aircard` by default. Remove that directory if you no longer need the token.
+`~/.local/share/aircard` by default. This directory also holds automatically saved backups and recovery data. Keep it while
+you need Restore or have an unfinished operation; do not remove it just to clear the token.
 
 AirCard does not install a system service. Delete your own exported previews/card backups and
 redirected logs when no longer needed. Native library and usbmuxd packages may be shared

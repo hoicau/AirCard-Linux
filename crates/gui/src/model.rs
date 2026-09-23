@@ -143,8 +143,8 @@ pub fn progress_text(event: &Value) -> Option<&'static str> {
         Some("verify_artwork") => Some("Verifying card artwork"),
         Some("refresh_caches") => Some("Refreshing Wallet caches"),
         Some("restore_originals") => Some("Restoring original files"),
-        Some("preserve_books") => Some("Preserving Books data"),
-        Some("restore_books") => Some("Restoring Books data"),
+        Some("preserve_catalog") => Some("Preserving device data"),
+        Some("restore_catalog") => Some("Restoring device data"),
         Some("save_backup") => Some("Saving private backup"),
         Some("cleanup") => Some("Finishing cleanup"),
         _ => match event["event"].as_str() {
@@ -170,6 +170,65 @@ pub fn error_message(event: &Value) -> Option<String> {
         }.into());
     }
     let error = &event["error"];
+    if let Some(operation) = error["operation"].as_str() {
+        if let Some(reason) = operation.strip_prefix("card_backup_input_") {
+            let guidance = match reason {
+                "not_found" => {
+                    "The backup file does not exist. Select the existing backup saved by a previous Apply. A new backup path is only for Apply."
+                }
+                "not_file" => {
+                    "Restore requires the backup file saved by Apply. A recovery directory belongs in Recovery directory; use Review recovery for an interrupted operation."
+                }
+                "permissions" => {
+                    "The backup file allows access by other users. Set this backup file's permissions to 0600 (chmod 600), then retry Restore."
+                }
+                "permission_denied" => {
+                    "The backup file cannot be opened. Check read permission and access to its parent directories."
+                }
+                "symlink" => {
+                    "Select the actual backup file saved by Apply; symbolic links are not accepted."
+                }
+                "size" => {
+                    "The backup file exceeds the 520 MiB limit. Select the original backup saved by Apply."
+                }
+                _ => {
+                    "The backup file could not be read. Select the existing backup saved by Apply and check its path and access permissions."
+                }
+            };
+            return Some(guidance.into());
+        }
+        if matches!(
+            operation,
+            "card_backup_decode"
+                | "card_backup_integrity"
+                | "card_backup_target"
+                | "card_backup_scope"
+                | "card_backup_card"
+                | "card_backup_empty_artwork"
+                | "card_backup_size"
+                | "card_backup_device_mismatch"
+                | "card_backup_already_exists"
+        ) {
+            return Some(match operation {
+                "card_backup_device_mismatch" => "This backup belongs to a different iPhone. Select its original device.",
+                "card_backup_already_exists" => "A backup already exists at this path. Choose an unused path for Apply; keep the existing backup for Restore.",
+                _ => "This file is not a valid AirCard card backup or failed its integrity checks. Select the original backup saved by Apply. An image, exported artwork archive or diagnostic file cannot be used for Restore.",
+            }.into());
+        }
+        if operation.starts_with("grappa_token") {
+            return Some("The sync token could not be read or is invalid. Use Get sync token automatically, or select an existing 84-byte token file with permissions 0600.".into());
+        }
+        if let Some(reason) = operation.strip_prefix("local_input_") {
+            return Some(match reason {
+                "not_found" => "The local input file does not exist. Select an existing file.",
+                "not_file" => "Select a regular input file, not a directory or special file.",
+                "permissions" => "The private input file allows access by other users. Set its permissions to 0600 (chmod 600).",
+                "symlink" => "Select the actual input file; symbolic links are not accepted.",
+                "size" => "The local input file exceeds the size limit for this operation.",
+                _ => "A local input file could not be read. Check its path and access permissions.",
+            }.into());
+        }
+    }
     let kind = error["kind"].as_str().or(event["kind"].as_str());
     let message = match kind {
         Some("locked") => "Unlock your iPhone and retry the device check.",
@@ -193,13 +252,6 @@ pub fn error_message(event: &Value) -> Option<String> {
         }
         Some("timeout") => {
             "The connection timed out. Unlock the iPhone and check the cable or Wi-Fi connection."
-        }
-        Some("invalid_input")
-            if error["operation"]
-                .as_str()
-                .is_some_and(|s| s.starts_with("grappa_token") || s.starts_with("local_input")) =>
-        {
-            "A local input file could not be read. Check its path, size and permissions. Sync tokens must be 84 bytes with permissions 0600."
         }
         _ => {
             return event["hint"]
@@ -246,6 +298,33 @@ pub fn redacted(value: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn backup_errors_identify_the_file_and_never_blame_the_token() {
+        for (operation, expected) in [
+            ("card_backup_input_not_found", "previous Apply"),
+            ("card_backup_input_not_file", "Review recovery"),
+            ("card_backup_input_permissions", "chmod 600"),
+            ("card_backup_input_permission_denied", "read permission"),
+            ("card_backup_input_symlink", "symbolic links"),
+            ("card_backup_input_size", "520 MiB"),
+            ("card_backup_decode", "original backup"),
+            ("card_backup_integrity", "integrity checks"),
+        ] {
+            let event = serde_json::json!({"event":"error","error":{"kind":"invalid_input","operation":operation,"hint":"private-path"}});
+            let message = error_message(&event).unwrap();
+            assert!(message.contains(expected), "{operation}: {message}");
+            assert!(
+                !message.contains("token")
+                    && !message.contains("84")
+                    && !message.contains("private-path")
+            );
+        }
+        let event = serde_json::json!({"error":{"kind":"invalid_input","operation":"grappa_token_input_permissions"}});
+        assert!(error_message(&event).unwrap().contains("84-byte token"));
+        let event =
+            serde_json::json!({"error":{"kind":"invalid_input","operation":"local_input_open"}});
+        assert!(!error_message(&event).unwrap().contains("token"));
+    }
     fn device(id: &str, route: &str, paired: bool) -> Device {
         Device {
             udid: id.into(),

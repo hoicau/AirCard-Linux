@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 mod app;
 mod model;
+mod storage;
 mod worker;
 use clap::Parser;
 use std::path::PathBuf;

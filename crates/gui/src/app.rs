@@ -3,6 +3,7 @@ use crate::{
     model::{
         Confirmation, Device, Discovery, error_message, preferred_device, progress_text, redacted,
     },
+    storage::{Paths, Storage},
     worker::{self, Message},
 };
 use aircard_core::assets::{PreparedCard, Resource, resources_zip};
@@ -27,6 +28,8 @@ enum Field {
     CardInput,
     CardOutput,
     Snapshot,
+    BackupOutput,
+    Recovery,
     Token,
 }
 enum LocalResult {
@@ -42,7 +45,7 @@ struct Smoke {
     requested: bool,
     started: Instant,
 }
-const SMOKE_NAMES: [&str; 9] = [
+const SMOKE_NAMES: [&str; 12] = [
     "artwork-light",
     "artwork-dark",
     "help-light",
@@ -52,6 +55,9 @@ const SMOKE_NAMES: [&str; 9] = [
     "listening-light",
     "no-card-dark",
     "device-compact-light",
+    "save-locations-dark",
+    "restore-light",
+    "save-locations-compact",
 ];
 pub struct App {
     cli: PathBuf,
@@ -71,6 +77,14 @@ pub struct App {
     device_check: Option<bool>,
     cli_verified: bool,
     snapshot: String,
+    backup_output: String,
+    recovery: String,
+    automatic_paths: bool,
+    storage: Option<Storage>,
+    storage_device: Option<String>,
+    planned_paths: Option<Paths>,
+    active_backup: Option<String>,
+    active_recovery: Option<String>,
     token: String,
     token_attempted: bool,
     journal: String,
@@ -130,6 +144,7 @@ impl App {
                 app.install_card(&cc.egui_ctx, card);
             }
             app.snapshot = "card-backup.json".into();
+            app.backup_output = "local-data/aircard/operations/new/backup.json".into();
             app.card_hash = "fixture-card-identifier".into();
             app.token = "private-token.bin".into();
             app.journal = "recovery.json".into();
@@ -137,6 +152,15 @@ impl App {
             app.status = "UI verification with synthetic data. Device access disabled.".into();
         } else {
             app.refresh();
+        }
+        if app.smoke.is_none() {
+            match Storage::default() {
+                Ok(storage) => app.storage = Some(storage),
+                Err(message) => {
+                    app.status = message;
+                    app.automatic_paths = false;
+                }
+            }
         }
         app
     }
@@ -159,6 +183,14 @@ impl App {
             device_check: None,
             cli_verified: false,
             snapshot: String::new(),
+            backup_output: String::new(),
+            recovery: String::new(),
+            automatic_paths: true,
+            storage: None,
+            storage_device: None,
+            planned_paths: None,
+            active_backup: None,
+            active_recovery: None,
             token: cli::sync_token::cached()
                 .map_or_else(String::new, |p| p.to_string_lossy().into_owned()),
             token_attempted: false,
@@ -234,7 +266,59 @@ impl App {
         self.stage = name.into();
         self.job_name = name.into();
         self.job_writes = args.iter().any(|a| a == "--apply");
+        if self.job_writes {
+            self.active_backup = args
+                .windows(2)
+                .find(|p| p[0] == "--backup")
+                .map(|p| p[1].clone());
+            self.active_recovery = if args.first().is_some_and(|s| s == "card-recover") {
+                args.get(1).cloned()
+            } else {
+                args.windows(2)
+                    .find(|p| p[0] == "--journal")
+                    .map(|p| p[1].clone())
+            };
+        }
         self.job = Some(worker::start(self.cli.clone(), args));
+    }
+    fn renew_save_paths(&mut self) {
+        if self.automatic_paths
+            && let (Some(storage), Some(device)) = (&self.storage, self.chosen())
+        {
+            let paths = storage.fresh(&device.udid);
+            self.backup_output = paths.backup.to_string_lossy().into_owned();
+            self.journal = paths.recovery.to_string_lossy().into_owned();
+            self.planned_paths = Some(paths);
+        }
+    }
+    fn sync_saved_paths(&mut self) {
+        let device = self.chosen().map(|d| d.udid);
+        if device == self.storage_device || self.storage.is_none() {
+            return;
+        }
+        self.storage_device = device.clone();
+        self.snapshot.clear();
+        self.recovery.clear();
+        if let Some(device) = device {
+            let (backup, recovery) = self.storage.as_ref().unwrap().recent(&device);
+            self.snapshot = backup.map_or_else(String::new, |p| p.to_string_lossy().into_owned());
+            self.recovery = recovery.map_or_else(String::new, |p| p.to_string_lossy().into_owned());
+            self.renew_save_paths();
+        }
+    }
+    fn finish_save_paths(&mut self) {
+        if !self.job_writes {
+            return;
+        }
+        if let Some(path) = self.active_recovery.take() {
+            if PathBuf::from(&path).is_dir() {
+                self.recovery = path;
+            } else if self.recovery == path {
+                self.recovery.clear();
+            }
+        }
+        self.active_backup = None;
+        self.renew_save_paths();
     }
     fn refresh(&mut self) {
         if self.busy() {
@@ -317,7 +401,9 @@ impl App {
     fn picker(&mut self, field: Field, save: bool) {
         self.local_job("Choose file", move || {
             let dialog = rfd::FileDialog::new();
-            let path = if save {
+            let path = if matches!(field, Field::Recovery) {
+                dialog.pick_folder()
+            } else if save {
                 dialog.save_file()
             } else {
                 dialog.pick_file()
@@ -330,6 +416,8 @@ impl App {
             Field::CardInput => &mut self.card_input,
             Field::CardOutput => &mut self.card_output,
             Field::Snapshot => &mut self.snapshot,
+            Field::BackupOutput => &mut self.backup_output,
+            Field::Recovery => &mut self.recovery,
             Field::Token => &mut self.token,
         }
     }
@@ -340,8 +428,7 @@ impl App {
             if ui
                 .add_sized(
                     [width, 32.0],
-                    egui::TextEdit::singleline(self.field(field))
-                        .hint_text("Choose a file or enter its path"),
+                    egui::TextEdit::singleline(self.field(field)).hint_text("Path"),
                 )
                 .changed()
             {
@@ -401,6 +488,11 @@ impl App {
                         && let Some(path) = v["path"].as_str()
                     {
                         self.token = path.into();
+                    }
+                    if v["event"] == "card_backup_saved"
+                        && let Some(path) = &self.active_backup
+                    {
+                        self.snapshot = path.clone();
                     }
                     if (v["event"] == "error" || v["failure"].is_object())
                         && let Some(message) = error_message(&v)
@@ -487,7 +579,12 @@ impl App {
                             if self.job_name == "Check device" {
                                 self.device_check = Some(false);
                             }
-                            if self.job_writes && PathBuf::from(self.journal.trim()).is_dir() {
+                            if self.job_writes
+                                && self
+                                    .active_recovery
+                                    .as_ref()
+                                    .is_some_and(|p| PathBuf::from(p).is_dir())
+                            {
                                 self.status.push_str(" Keep this recovery directory. Reconnect the original iPhone, close Wallet and Books, then use Recover before another Apply.");
                             }
                             if self.job_name == "Detect Wallet card" {
@@ -505,6 +602,7 @@ impl App {
                             self.restore_review = None;
                         }
                     }
+                    self.finish_save_paths();
                 }
             }
         }
@@ -513,6 +611,7 @@ impl App {
             self.failed = true;
             self.status =
                 "CLI monitor stopped unexpectedly. Inspect recovery status before retrying.".into();
+            self.finish_save_paths();
         }
         let result = self.local.as_ref().and_then(|rx| match rx.try_recv() {
             Ok(r) => Some(r),
@@ -664,6 +763,7 @@ impl App {
         });
     }
     fn device(&mut self, ui: &mut egui::Ui) {
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
         title(
             ui,
             "Apply & restore",
@@ -764,15 +864,6 @@ impl App {
                     ui.selectable_value(&mut self.card_hash, hash.clone(), hash);
                 }
             });
-        self.path_row(
-            ui,
-            "Private card backup (new for Apply, existing for Restore)",
-            Field::Snapshot,
-            false,
-        );
-        if ui.button("Choose new backup path…").clicked() {
-            self.picker(Field::Snapshot, true);
-        }
         ui.label(RichText::new("Sync token").strong());
         ui.label(if self.token.is_empty() {
             "Fetched automatically from a pinned public GitHub source after a card is selected, then saved privately on this computer."
@@ -791,15 +882,26 @@ impl App {
         ui.collapsing("Use an existing token / show path", |ui| {
             self.path_row(ui, "Private 84-byte token file", Field::Token, false);
         });
-        ui.label(RichText::new("Recovery directory").strong());
-        ui.add(
-            egui::TextEdit::singleline(&mut self.journal)
-                .hint_text("Unused directory for Apply / Restore; existing directory for Recover"),
-        );
-        let ready = paired
-            && self.device_check != Some(false)
-            && !self.token.trim().is_empty()
-            && !self.journal.trim().is_empty();
+        self.sync_saved_paths();
+        ui.label(RichText::new("Backup & recovery").strong());
+        ui.label("Your original card artwork is saved automatically so you can restore it later. Recovery files protect you if an operation is interrupted.");
+        egui::CollapsingHeader::new("Advanced save locations")
+            .open(self.smoke.as_ref().map(|s| matches!(s.phase, 9 | 11)))
+            .show(ui, |ui| {
+            if ui.checkbox(&mut self.automatic_paths, "Choose save locations automatically").changed() {
+                self.renew_save_paths();
+            }
+            ui.label("Each Apply or Restore gets a fresh folder under your local AirCard data directory. Existing backups are kept.");
+            ui.add_enabled_ui(!self.automatic_paths, |ui| {
+                self.path_row(ui, "New backup file for Apply", Field::BackupOutput, true);
+                ui.label("New recovery folder for Apply or Restore");
+                ui.add(egui::TextEdit::singleline(&mut self.journal).desired_width(f32::INFINITY).hint_text("Path"));
+            });
+            ui.label("These paths must be unused. AirCard creates the backup file and recovery folder when you confirm the operation.");
+        });
+        let connected = paired && self.device_check != Some(false) && !self.token.trim().is_empty();
+        let recovery_pending = !self.recovery.is_empty() && PathBuf::from(&self.recovery).is_dir();
+        let ready = connected && !self.journal.trim().is_empty() && !recovery_pending;
         let common = vec![
             "--journal".into(),
             self.journal.trim().into(),
@@ -808,24 +910,55 @@ impl App {
             "--timeout".into(),
             "25".into(),
         ];
-        ui.horizontal_wrapped(|ui| {
-            if ui.add_enabled(ready && self.card.is_some() && !self.card_hash.is_empty() && !self.snapshot.trim().is_empty(), egui::Button::new("Review apply…")).clicked() {
-                let mut args = vec!["card-apply".into(), self.card_input.trim().into(), "--card-hash".into(), self.card_hash.clone(), "--backup".into(), self.snapshot.trim().into()];
-                args.extend(["--expected-artwork-sha256".into(), aircard_core::sha256(&self.card.as_ref().unwrap().png)]);
-                args.extend(common.clone());
-                self.review("Apply card artwork", "Replace this card's existing background images, invalidate its display caches and save a private restore backup. Keep Wallet and Books closed during the operation. Reopen Wallet when complete.", args);
-            }
-            if ui.add_enabled(ready && !self.snapshot.trim().is_empty(), egui::Button::new("Review restore…")).clicked() {
-                let mut args = vec!["card-restore".into(), self.snapshot.trim().into()]; args.extend(common.clone());
-                self.restore_review = self.chosen().map(|device| Confirmation { title: "Restore card artwork".into(), summary: "Restore the artwork and display caches from this private backup on its original device. Keep Wallet and Books closed.".into(), device, args: args.clone(), accepted:false });
-                self.start("Validate backup", args);
-            }
-            if ui.add_enabled(ready, egui::Button::new("Review recovery…")).clicked() {
-                self.review("Recover interrupted card operation", "Restore the card's originals and complete cleanup from the private transaction directory. Use the original device and keep Wallet and Books closed.", vec!["card-recover".into(), self.journal.trim().into(), "--grappa-token".into(), self.token.trim().into(), "--timeout".into(), "25".into()]);
-            }
-        });
-        ui.label(RichText::new("Keep backups until you no longer need Restore. Keep interrupted recovery directories until recovery succeeds.").small().weak());
+        if ui
+            .add_enabled(
+                ready
+                    && self.card.is_some()
+                    && !self.card_hash.is_empty()
+                    && !self.backup_output.trim().is_empty(),
+                egui::Button::new("Review apply…"),
+            )
+            .clicked()
+        {
+            let mut args = vec![
+                "card-apply".into(),
+                self.card_input.trim().into(),
+                "--card-hash".into(),
+                self.card_hash.clone(),
+                "--backup".into(),
+                self.backup_output.trim().into(),
+            ];
+            args.extend([
+                "--expected-artwork-sha256".into(),
+                aircard_core::sha256(&self.card.as_ref().unwrap().png),
+            ]);
+            args.extend(common.clone());
+            self.review("Apply card artwork", "Replace this card's background and save its original artwork in the backup below. Keep Wallet and Books closed during the operation. Reopen Wallet when complete.", args);
+        }
+        if recovery_pending {
+            ui.label("An unfinished operation was found. Use Recover below on the original iPhone before applying another change.");
+        }
+        egui::CollapsingHeader::new("Restore or recover")
+            .default_open(recovery_pending)
+            .open(if recovery_pending { Some(true) } else { self.smoke.as_ref().map(|s| s.phase == 10) })
+            .show(ui, |ui| {
+                ui.label("Restore returns the card saved in a backup to its previous artwork. The latest backup for this iPhone is selected automatically; you can choose an older one.");
+                self.path_row(ui, "Existing backup to restore", Field::Snapshot, false);
+                if ui.add_enabled(ready && !self.snapshot.trim().is_empty(), egui::Button::new("Review restore…")).clicked() {
+                    let mut args = vec!["card-restore".into(), self.snapshot.trim().into()]; args.extend(common);
+                    self.restore_review = self.chosen().map(|device| Confirmation { title: "Restore card artwork".into(), summary: "Restore the card saved in this backup on its original device. Keep Wallet and Books closed.".into(), device, args: args.clone(), accepted:false });
+                    self.start("Validate backup", args);
+                }
+                ui.add_space(8.0);
+                ui.label("Recover finishes cleanup or restores originals after an interruption. Its existing recovery folder is selected automatically for operations saved here.");
+                self.path_row(ui, "Existing recovery folder", Field::Recovery, false);
+                if ui.add_enabled(connected && !self.recovery.trim().is_empty(), egui::Button::new("Review recovery…")).clicked() {
+                    self.review("Recover interrupted card operation", "Restore originals or finish cleanup from this interrupted operation. Use the original iPhone and keep Wallet and Books closed.", vec!["card-recover".into(), self.recovery.trim().into(), "--grappa-token".into(), self.token.trim().into(), "--timeout".into(), "25".into()]);
+                }
+                ui.label("Keep backups until you no longer need Restore. Recovery folders are removed automatically after successful cleanup.");
+            });
     }
+
     fn help(&self, ui: &mut egui::Ui) {
         title(
             ui,
@@ -852,7 +985,7 @@ impl App {
             ),
             (
                 "Apply",
-                "Select your paired iPhone. Detection starts automatically; wait for the prompt, then open Wallet and tap the intended card. A single detected identifier is filled in for review. Choose a new private backup and recovery directory.",
+                "Select your paired iPhone. Detection starts automatically; wait for the prompt, then open Wallet and tap the intended card. A single detected identifier is filled in for review. Backup and recovery locations are chosen automatically; review them before confirming.",
             ),
             (
                 "Sync token",
@@ -893,6 +1026,8 @@ impl App {
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .default_width(440.0)
             .show(ctx, |ui| {
+                ui.set_max_width(440.0);
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                 ui.heading(&c.title);
                 ui.label(RichText::new(c.device.label()).strong());
                 ui.label(format!("iOS {} / Paired", c.device.ios));
@@ -932,6 +1067,21 @@ impl App {
                 });
             });
         if apply {
+            if self.automatic_paths
+                && c.args.first().is_some_and(|s| s != "card-recover")
+                && self.smoke.is_none()
+            {
+                let prepared = match (&self.storage, &self.planned_paths) {
+                    (Some(storage), Some(paths)) => storage.prepare(&c.device.udid, paths),
+                    _ => Err("Automatic save locations are unavailable. Choose custom locations under Advanced save locations.".into()),
+                };
+                if let Err(message) = prepared {
+                    self.status = message;
+                    self.failed = true;
+                    self.renew_save_paths();
+                    return;
+                }
+            }
             let mut args = c.args;
             args.push("--apply".into());
             args.extend(c.device.selector());
@@ -951,14 +1101,14 @@ impl App {
         if smoke.frames == 0 {
             smoke.started = Instant::now();
             let phase = smoke.phase;
-            self.dark = matches!(phase, 1 | 4 | 7);
+            self.dark = matches!(phase, 1 | 4 | 7 | 9);
             self.tab = match phase {
                 2 => Tab::Help,
-                3 | 4 | 6..=8 => Tab::Device,
+                3 | 4 | 6..=11 => Tab::Device,
                 _ => Tab::Artwork,
             };
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(
-                if matches!(phase, 5 | 8) {
+                if matches!(phase, 5 | 8 | 11) {
                     Vec2::new(700.0, 540.0)
                 } else {
                     Vec2::new(1080.0, 780.0)
@@ -980,6 +1130,13 @@ impl App {
                 self.discovery.lines = 100;
                 self.stage = "No card detected".into();
                 self.status = self.discovery.result(0);
+            }
+            if phase >= 9 {
+                self.discovery = Discovery::default();
+                self.card_hash = "fixture-card-identifier".into();
+                self.token = "private-token.bin".into();
+                self.stage = "Ready".into();
+                self.status = "UI verification with synthetic data. Device access disabled.".into();
             }
             if phase == 4 {
                 self.review("Apply card artwork", "Replace the selected card background and save its original artwork in a private backup. This is a UI fixture; no device operation will run.", vec!["card-apply".into(), "synthetic.png".into(), "--backup".into(), "card-backup.json".into(), "--journal".into(), "recovery".into(), "--card-hash".into(), "fixture-card-identifier".into()]);
@@ -1067,7 +1224,6 @@ impl eframe::App for App {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("AirCard").size(23.0).strong());
-                    ui.label(RichText::new("LINUX / WALLET").small().weak());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.selectable_label(self.dark, "Dark").clicked() {
                             self.dark = true;
@@ -1153,18 +1309,22 @@ impl eframe::App for App {
                     .fill(ctx.style().visuals.window_fill),
             )
             .show(ctx, |ui| {
-                egui::ScrollArea::vertical()
+                let mut scroll = egui::ScrollArea::vertical()
                     .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        ui.add_enabled_ui(!self.busy() && self.pending.is_none(), |ui| match self
-                            .tab
-                        {
+                    .auto_shrink([false, false]);
+                if let Some(smoke) = &self.smoke {
+                    scroll =
+                        scroll.vertical_scroll_offset(if smoke.phase >= 9 { 500.0 } else { 0.0 });
+                }
+                scroll.show(ui, |ui| {
+                    ui.add_enabled_ui(!self.busy() && self.pending.is_none(), |ui| {
+                        match self.tab {
                             Tab::Artwork => self.artwork(ui),
                             Tab::Device => self.device(ui),
                             Tab::Help => self.help(ui),
-                        });
+                        }
                     });
+                });
             });
         // Repaint once after navigation or a device change so automatic setup can start.
         if self.tab == Tab::Device
@@ -1226,6 +1386,75 @@ fn empty_preview(ui: &mut egui::Ui, heading: &str, description: &str) {
 mod tests {
     use super::*;
     use std::sync::{Arc, atomic::AtomicBool};
+
+    #[test]
+    fn automatic_paths_keep_restore_inputs_and_recover_interrupted_operations_after_restart() {
+        let root = std::env::temp_dir().join(format!("aircard-gui-paths-{}", std::process::id()));
+        struct Clean(PathBuf);
+        impl Drop for Clean {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _clean = Clean(root.clone());
+        let mut app = App::empty(PathBuf::new(), false);
+        app.storage = Some(Storage::at(root.clone()));
+        app.devices.push(Device {
+            udid: "fixture-phone".into(),
+            route: "usb".into(),
+            ios: "fixture".into(),
+            paired: true,
+            status: "paired_session_verified".into(),
+        });
+        app.selected = Some(0);
+        app.sync_saved_paths();
+        assert!(!app.backup_output.is_empty() && !app.journal.is_empty());
+        assert!(app.snapshot.is_empty() && app.recovery.is_empty());
+        assert!(!root.exists());
+        let paths = app.planned_paths.clone().unwrap();
+        app.storage
+            .as_ref()
+            .unwrap()
+            .prepare("fixture-phone", &paths)
+            .unwrap();
+        cli::local::write_new(&paths.backup, b"synthetic backup").unwrap();
+        cli::local::create_private_directory(&paths.recovery).unwrap();
+        app.job_writes = true;
+        app.active_backup = Some(app.backup_output.clone());
+        app.active_recovery = Some(app.journal.clone());
+        let (tx, receiver) = mpsc::sync_channel(4);
+        app.job = Some(worker::Job {
+            receiver,
+            cancel: Arc::new(AtomicBool::new(false)),
+        });
+        tx.send(Message::Event(
+            serde_json::json!({"event":"card_backup_saved"}),
+        ))
+        .unwrap();
+        tx.send(Message::Finished(Err("interrupted cleanup".into())))
+            .unwrap();
+        app.poll(&egui::Context::default());
+        assert_eq!(PathBuf::from(&app.snapshot), paths.backup);
+        assert_eq!(PathBuf::from(&app.recovery), paths.recovery);
+        assert_ne!(app.snapshot, app.backup_output);
+        assert_ne!(app.recovery, app.journal);
+        let mut reopened = App::empty(PathBuf::new(), false);
+        reopened.storage = Some(Storage::at(root));
+        reopened.devices = app.devices.clone();
+        reopened.selected = Some(0);
+        reopened.sync_saved_paths();
+        assert_eq!(reopened.snapshot, app.snapshot);
+        assert_eq!(reopened.recovery, app.recovery);
+        std::fs::remove_dir(&paths.recovery).unwrap();
+        reopened.job_writes = true;
+        reopened.active_recovery = Some(reopened.recovery.clone());
+        reopened.finish_save_paths();
+        assert!(reopened.recovery.is_empty());
+        assert_eq!(reopened.snapshot, app.snapshot);
+        reopened.devices[0].udid = "different-phone".into();
+        reopened.sync_saved_paths();
+        assert!(reopened.snapshot.is_empty() && reopened.recovery.is_empty());
+    }
 
     #[test]
     fn automatic_setup_runs_discovery_then_token_through_verified_worker() {
