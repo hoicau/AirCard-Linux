@@ -42,10 +42,15 @@ fn verify_cli(binary: &Path, cancel: &AtomicBool) -> Result<(), String> {
     let mut child = Command::new(binary)
         .arg("--version")
         .env_remove("AIRCARD_INTERNAL_WORKER")
-        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
+        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped())
         .process_group(0).spawn()
         .map_err(|_| "Cannot start the matching aircard CLI. Keep aircard and aircard-gui from the same release together and install the native libraries listed in docs/INSTALL.md.".to_string())?;
     let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take().expect("piped stderr");
+    let error_reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr.take(4097).read_to_end(&mut bytes).map(|_| bytes)
+    });
     let reader = thread::spawn(move || {
         let mut bytes = Vec::new();
         stdout.take(257).read_to_end(&mut bytes).map(|_| bytes)
@@ -68,6 +73,11 @@ fn verify_cli(binary: &Path, cancel: &AtomicBool) -> Result<(), String> {
     );
     let _ = child.wait();
     let bytes = reader.join().ok().and_then(Result::ok).unwrap_or_default();
+    let errors = error_reader
+        .join()
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default();
     if cancel.load(Ordering::Relaxed) {
         return Err("CLI check cancelled.".into());
     }
@@ -75,6 +85,9 @@ fn verify_cli(binary: &Path, cancel: &AtomicBool) -> Result<(), String> {
         return Err("CLI version check did not finish within 3 seconds. Reinstall both binaries from the same release.".into());
     }
     if !status.is_some_and(|s| s.success()) {
+        if let Some(message) = loader_error(&errors) {
+            return Err(message);
+        }
         return Err("CLI cannot run. Reinstall both binaries from the same release and check native library dependencies in docs/INSTALL.md.".into());
     }
     if bytes.len() > 256
@@ -86,6 +99,27 @@ fn verify_cli(binary: &Path, cancel: &AtomicBool) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+fn loader_error(bytes: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    if let Some(rest) = text.split("error while loading shared libraries: ").nth(1) {
+        let name = rest.split(':').next()?;
+        // Show only a bounded library name, never the executable path or arbitrary stderr.
+        if name.len() <= 128
+            && name.contains(".so")
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._+-".contains(&b))
+        {
+            return Some(format!(
+                "CLI cannot load {name}. Extract the complete release, keeping its lib directory beside aircard. If the library is a system dependency, install a compatible package or build locally; see docs/INSTALL.md."
+            ));
+        }
+    }
+    if text.contains("version `GLIBC_") && text.contains("not found") {
+        return Some("This release requires a newer glibc than your system provides. Use a compatible build or compile locally; see BUILD-INFO.txt and docs/INSTALL.md.".into());
+    }
+    None
 }
 fn run(
     binary: &Path,
@@ -208,6 +242,23 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn loader_diagnostics_show_only_the_missing_library_or_glibc_requirement() {
+        let message = loader_error(b"/private/downloads/aircard: error while loading shared libraries: libusbmuxd-2.0.so.6: cannot open shared object file: No such file or directory\n").unwrap();
+        assert!(message.contains("libusbmuxd-2.0.so.6"));
+        assert!(message.contains("lib directory"));
+        assert!(!message.contains("private/downloads"));
+        assert!(
+            loader_error(b"aircard: /lib/libc.so.6: version `GLIBC_2.39' not found")
+                .unwrap()
+                .contains("newer glibc")
+        );
+        assert!(loader_error(b"private arbitrary stderr").is_none());
+        assert!(
+            loader_error(b"error while loading shared libraries: /private/secret.so: missing")
+                .is_none()
+        );
+    }
     #[test]
     fn mismatched_cli_is_rejected_before_running_commands() {
         // /bin/echo accepts --version, but is not the matching AirCard CLI.

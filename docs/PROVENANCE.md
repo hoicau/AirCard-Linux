@@ -32,7 +32,12 @@ backend fails closed: libimobiledevice's public AFC service constructor does not
 all TLS-enable failures and offers no public connection-injection API. Raw ATC and syslog
 connections explicitly check `idevice_connection_enable_ssl`.
 
-The native system libraries are dynamically linked and retain their upstream LGPL licenses.
+The native device libraries are dynamically linked and retain their upstream LGPL licenses.
+CI releases ship a matching set in `lib/`, with distribution copyright/license files in
+`docs/native-licenses/` and exact distribution source packages in `native-sources/`.
+`NATIVE-LIBRARIES.json` records binary/source package versions and library checksums.
+Packaging changes only the libraries' ELF RUNPATH to `$ORIGIN`; they remain replaceable
+with compatible rebuilt libraries. TLS, glibc and graphics libraries remain system-provided.
 Rust dependencies and embedded-font license texts are included in packaged notices. The
 eframe/egui MIT text is also retained in `docs/licenses/egui-MIT.txt`. `plist` is pinned to
 1.10.1 to use its opt-in event parser for limits before constructing nested values.

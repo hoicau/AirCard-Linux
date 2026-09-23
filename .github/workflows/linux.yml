@@ -16,7 +16,11 @@ jobs:
       - name: Native development and headless graphics libraries
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libimobiledevice-dev libplist-dev libusbmuxd-dev libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxkbcommon-dev libxkbcommon-x11-0 libwayland-dev libegl1-mesa-dev libgl1-mesa-dev libgl1-mesa-dri xvfb xauth python3 binutils
+          sudo apt-get install -y build-essential pkg-config libimobiledevice-dev libplist-dev libusbmuxd-dev libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxkbcommon-dev libxkbcommon-x11-0 libwayland-dev libegl1-mesa-dev libgl1-mesa-dev libgl1-mesa-dri xvfb xauth python3 binutils patchelf curl ca-certificates
+      - name: Enable matching native-library source packages
+        run: |
+          sudo python3 scripts/enable-source-repositories.py
+          sudo apt-get update
       - name: Latest stable Rust
         run: |
           rustup toolchain install stable --profile minimal --component rustfmt --component clippy
@@ -32,12 +36,14 @@ jobs:
               "cargo", "metadata", "--locked", "--no-deps", "--format-version", "1",
           ]))
           versions = {p["version"] for p in metadata["packages"] if p["name"] in {"cli", "gui"}}
-          if versions != {os.environ["RELEASE_TAG"].removeprefix("v")}:
-              raise SystemExit("Release tag must match the CLI/GUI version (for example v0.1.0)")
+          tag = os.environ["RELEASE_TAG"]
+          if versions != {tag.removeprefix("v")}:
+              raise SystemExit(f"Release tag {tag!r} does not match CLI/GUI versions {sorted(versions)}. Update Cargo.toml and Cargo.lock before tagging the release.")
           PY
       - run: cargo fmt --check
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo test --locked --workspace
+      - run: python3 scripts/test-native-bundle.py
       - run: cargo build --locked --workspace --release
       - name: Native GUI smoke test (synthetic data only)
         run: |
@@ -45,7 +51,21 @@ jobs:
           xvfb-run -a -s '-screen 0 1280x960x24 -nolisten tcp' env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET LIBGL_ALWAYS_SOFTWARE=1 timeout 40s target/release/aircard-gui --smoke-dir .local/gui-smoke
           python3 scripts/check-gui-smoke.py .local/gui-smoke
       - name: Native archive
-        run: ./scripts/package-native.sh
+        run: ./scripts/package-native.sh --bundle-native
+      - name: Relocated bundle regression test
+        run: python3 scripts/check-native-bundle.py dist/*.tar.gz
+      - name: Bundle startup on Arch without system device libraries
+        run: |
+          docker run --rm -v "$PWD/scripts:/checks:ro" -v "$PWD/dist:/dist:ro" archlinux:base bash -euc '
+            pacman -Syu --noconfirm --needed python
+            for package in libusbmuxd libimobiledevice libplist; do
+              if pacman -Q "$package"; then
+                echo "Unexpected system device library: $package" >&2
+                exit 1
+              fi
+            done
+            python /checks/check-native-bundle.py /dist/*.tar.gz
+          '
       - uses: actions/upload-artifact@v4
         with:
           name: aircard-linux

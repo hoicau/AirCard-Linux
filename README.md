@@ -24,9 +24,12 @@ cargo build --locked --workspace --release
 ./target/release/aircard-gui
 ```
 
-Keep `aircard` and `aircard-gui` together. Run as your normal user. The CLI also works
+Keep `aircard`, `aircard-gui` and the release's `lib/` directory together. Run as your normal user. The CLI also works
 without a desktop session. Native `.tar.gz` binaries include dependency/build information
-and checksums; use a build compatible with your distribution's glibc and native libraries.
+and checksums. CI archives bundle matching libimobiledevice, libusbmuxd and libplist
+libraries, including their native glue dependency when required. This avoids device-library
+SONAME differences between Ubuntu and Arch/Manjaro. Your system still supplies a compatible
+glibc, TLS/graphics libraries and the usbmuxd service; the archive is not fully static.
 
 ## Apply a card background
 
@@ -119,7 +122,7 @@ All card-changing commands default to dry-run and require `--apply`.
 | Linux x86_64, USB, iOS 27.0 | Card application, owner visual check, restore and interrupted recovery verified |
 | Paired Wi-Fi | Explicit route supported; hardware acceptance pending |
 | Other iOS versions/cards | Unverified; resource layout and private services can differ |
-| GitHub Actions `ubuntu-latest` | CI build/test/package checks with latest stable Rust; no iPhone required by CI |
+| GitHub Actions `ubuntu-latest` | Latest stable Rust, bundled device libraries, relocated startup checks on Ubuntu and Arch; no iPhone required by CI |
 | Debian, Arch derivatives, Fedora | Dependency guides supplied; build locally for matching libraries |
 
 The internal Books safeguard is bounded to 1024 entries, 16 MiB per file and 64 MiB total.
@@ -136,19 +139,22 @@ cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo test --locked --workspace
 cargo build --locked --workspace --release
 ./scripts/package-native.sh
+# On Debian/Ubuntu with deb-src enabled, create the same bundled layout as CI:
+./scripts/package-native.sh --bundle-native bundled
 ```
 
 Publishing a GitHub Release (including a prerelease) runs the `ubuntu-latest` checks
 with latest stable Rust and builds from the release commit. After the build passes, the
 release workflow attaches the native `.tar.gz` archive and SHA256 file. The tag must match
-the CLI/GUI version, for example `v0.1.1`. Ordinary pushes and pull requests produce CI artifacts only.
+the CLI/GUI version, for example `v0.1.2`. Ordinary pushes and pull requests produce CI artifacts only.
 
 Core data/image logic is platform-independent. `device` owns the Linux backend,
 `linux-adapter` isolates native FFI, `airtraffic` owns framing/state machines, and CLI/GUI
 own transaction policy and local files. [Protocol notes](docs/AIRTRAFFIC-RESEARCH.md) and
 [transaction/recovery design](docs/WALLET-TRANSACTIONS.md) describe observed behavior.
 
-Packaging uses an explicit file allowlist. Local device evidence, card identifiers, tokens,
+Bundled archives include native-library licenses, exact distribution source packages and
+a checksum/version manifest. Packaging uses an explicit file allowlist. Local device evidence, card identifiers, tokens,
 backups and journals are excluded from Git and archives. Logs contain counts and protocol
 state, not raw device syslog or pairing material. Remove completed temporary resources and
 private test data after validation. See [installation and uninstall](docs/INSTALL.md) and

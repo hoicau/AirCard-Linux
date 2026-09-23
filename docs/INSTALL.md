@@ -4,6 +4,14 @@ AirCard-Linux distributes native Linux executables. No Flatpak, AppImage or cont
 runtime is required to run the program. Hardware support remains experimental; consult
 the compatibility table in README before attempting device operations.
 
+CI release archives include a `lib/` directory containing matching libimobiledevice,
+libusbmuxd, libplist and any required libimobiledevice-glue. Keep this directory beside
+`aircard` when extracting or moving the application. The CLI uses relative ELF RUNPATHs
+to load this set, including indirect device-library dependencies. No system library is
+replaced and no compatibility symlink is needed. glibc, the dynamic loader, TLS/graphics
+libraries and the usbmuxd service remain system dependencies. See `BUILD-INFO.txt` for
+the build environment and glibc requirements.
+
 ## Debian and Ubuntu
 
 Build dependencies (Debian 12/13, Ubuntu 22.04/24.04):
@@ -127,12 +135,13 @@ cargo build --locked --workspace --release
 
 Required native minimums are libimobiledevice 1.3.0, libplist 2.2.0 and libusbmuxd 2.0.0.
 A minimum build version does not guarantee compatibility with a particular iOS version.
-The runtime must match the binary's CPU architecture, glibc requirement and native library
-SONAMEs. A binary built on current Arch is not automatically compatible with older Debian.
+The runtime must match the binary's CPU architecture and glibc requirement. Unbundled local
+builds also require matching device-library SONAMEs. A binary built on current Arch is not
+automatically compatible with older Debian.
 Prefer the build for your distribution/release, or compile on the target distribution.
 For a binary you built or otherwise trust, `ldd ./aircard` lists missing runtime libraries.
 
-Optional per-user installation:
+Optional per-user installation for a local build:
 
 ```sh
 install -Dm755 target/release/aircard "$HOME/.local/bin/aircard"
@@ -146,25 +155,48 @@ and requires an exact version match. Replace both files from the same release if
 check fails; consult native library dependencies if the CLI cannot run at all.
 Do not launch the GUI as root. It does not install a daemon or persist device identifiers.
 
+For a bundled release, retain the entire extracted directory in a user-owned location and
+launch `aircard-gui` there. Copying only the two binaries into `~/.local/bin` loses the
+bundled libraries. If the GUI reports a specific missing `.so`, first check that `lib/`
+was extracted beside `aircard`. A glibc version error requires a compatible build or a
+local build; bundling device libraries does not change the minimum glibc version.
+
 ## Native archives
 
 ```sh
 ./scripts/package-native.sh
-# Produces dist/aircard-linux-0.1.1-<architecture>.tar.gz and .sha256
+# Produces dist/aircard-linux-0.1.2-<architecture>.tar.gz and .sha256
 ```
 
 Pass an optional label, such as `debian-13`, to distinguish local builds.
 
+CI uses `./scripts/package-native.sh --bundle-native`. This mode requires Debian/Ubuntu,
+`patchelf`, matching binary/development packages, and `deb-src` indexes for those exact
+versions. It copies the complete device-library family and sets `$ORIGIN/lib` on the CLI
+and `$ORIGIN` on each bundled library. It also includes:
+
+- `NATIVE-LIBRARIES.json`: package versions and original/bundled library SHA256 hashes.
+- `docs/native-licenses/`: distribution copyright files and referenced license texts.
+- `native-sources/`: exact `.dsc` and source archives, including distribution patches and
+  build instructions, for rebuilding or replacing the dynamic libraries.
+
+Packaging fails if a matching source is unavailable or a device library resolves outside
+the archive. CI checks relocated startup on Ubuntu and in an Arch container without
+system libimobiledevice/libusbmuxd/libplist packages. The `ubuntu-latest` runner and latest
+stable Rust remain in use. Containers are used only for CI verification.
+
 Packaging additionally needs Python 3, GNU tar, gzip and binutils/readelf. The script
 builds with Cargo.lock, includes the CLI, GUI, license notices, docs and BUILD-INFO, and
 refuses to overwrite an existing archive. It explicitly excludes private device data and
-JSON evidence. Verify the adjacent checksum before extracting, then run `./aircard-gui`
+private JSON evidence. Verify the adjacent checksum before extracting, then run `./aircard-gui`
 from the extracted directory. Never mix binaries from different releases.
 CI builds on `ubuntu-latest` with latest stable Rust; archive names contain the version and CPU architecture. Publishing a GitHub Release,
 including a prerelease, builds its commit through the same checks and attaches the archive
 and its SHA256 file after the build passes. Use a tag matching the CLI/GUI version, such as
-`v0.1.1`; push and pull-request runs upload CI artifacts only. Failed release runs can be
-rerun; successful uploads replace assets with the same names. Other distributions can build
+`v0.1.2`; push and pull-request runs upload CI artifacts only. Commit the version and lockfile
+updates before creating the release tag. Rerunning a failed workflow uses the original commit;
+it does not pick up later fixes on the default branch. Publish the release against the corrected
+commit to include those fixes. Successful uploads replace assets with the same names. Other distributions can build
 with the guide above. Build availability is not hardware compatibility proof.
 
 ## USB and Wi-Fi diagnostics

@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
-# Explicit allowlist: no device evidence, token, snapshot, source tree or Apple binary.
+# Explicit allowlist: no device evidence, token, snapshot, workspace source or Apple binary.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+bundle_native=false
+if [[ "${1:-}" == "--bundle-native" ]]; then
+  bundle_native=true
+  shift
+fi
 label="${1:-}"
+if (( $# > 1 )); then
+  echo 'Usage: package-native.sh [--bundle-native] [label]' >&2
+  exit 2
+fi
 if [[ -n "$label" && ! "$label" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
   echo 'Use a simple distribution label, e.g. debian-13 or arch-x86_64.' >&2
   exit 2
@@ -24,18 +33,28 @@ install -m644 LICENSE README.md "$stage/$name/"
 mkdir "$stage/$name/docs"
 install -m644 docs/INSTALL.md docs/PROVENANCE.md docs/STATUS.md docs/SYNC-TOKEN.md docs/WALLET-TRANSACTIONS.md docs/AIRTRAFFIC-RESEARCH.md "$stage/$name/docs/"
 python3 scripts/license-notices.py "$stage/$name/THIRD-PARTY-NOTICES.txt"
+if "$bundle_native"; then
+  python3 scripts/bundle-native.py "$stage/$name"
+fi
 {
   git describe --always --dirty
   rustc --version
   uname -m
   if [[ -f /etc/os-release ]]; then cat /etc/os-release; fi
   pkg-config --modversion libimobiledevice-1.0 libplist-2.0 libusbmuxd-2.0
+  echo "Bundled device libraries: $bundle_native"
   for binary in aircard aircard-gui; do
     echo "$binary dependencies:"
-    readelf -d "target/release/$binary" | sed -n '/NEEDED/p'
+    readelf -d "$stage/$name/$binary" | sed -n '/NEEDED\|RUNPATH/p'
     echo "$binary glibc requirements:"
     readelf --version-info "target/release/$binary" | sed -n '/Name: GLIBC_/p'
   done
+  if "$bundle_native"; then
+    for library in "$stage/$name/lib/"*; do
+      echo "$(basename "$library") glibc requirements:"
+      readelf --version-info "$library" | sed -n '/Name: GLIBC_/p'
+    done
+  fi
 } > "$stage/$name/BUILD-INFO.txt"
 # Stable archive ordering/time for a fixed set of input binaries and build metadata.
 archive_epoch="${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct)}"
