@@ -12,13 +12,17 @@ Build dependencies (Debian 12/13, Ubuntu 22.04/24.04):
 sudo apt-get update
 sudo apt-get install build-essential pkg-config curl ca-certificates \
   libimobiledevice-dev libplist-dev libusbmuxd-dev \
-  libimobiledevice-utils usbmuxd avahi-utils
+  libimobiledevice-utils usbmuxd avahi-utils \
+  libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxkbcommon-dev \
+  libwayland-dev libegl1-mesa-dev libgl1-mesa-dev
 ```
 
-For a compatible prebuilt CLI binary, the runtime tools pull the native library packages:
+For compatible native CLI and GUI binaries:
 
 ```sh
-sudo apt-get install libimobiledevice-utils libusbmuxd-tools usbmuxd avahi-utils
+sudo apt-get install libimobiledevice-utils libusbmuxd-tools usbmuxd avahi-utils \
+  libx11-6 libxi6 libxcursor1 libxrandr2 libxkbcommon0 libxkbcommon-x11-0 \
+  libwayland-client0 libegl1 libgl1 xdg-desktop-portal
 ```
 
 Library package names differ across releases: for example Debian 12 uses
@@ -36,13 +40,15 @@ On an up-to-date Arch installation:
 
 ```sh
 sudo pacman -S --needed base-devel pkgconf curl ca-certificates \
-  libimobiledevice libplist libusbmuxd usbmuxd avahi
+  libimobiledevice libplist libusbmuxd usbmuxd avahi \
+  libx11 libxi libxcursor libxrandr libxkbcommon libxkbcommon-x11 wayland mesa xdg-desktop-portal
 ```
 
 Runtime-only installation:
 
 ```sh
-sudo pacman -S --needed libimobiledevice libplist libusbmuxd usbmuxd avahi
+sudo pacman -S --needed libimobiledevice libplist libusbmuxd usbmuxd avahi \
+  libx11 libxi libxcursor libxrandr libxkbcommon libxkbcommon-x11 wayland mesa xdg-desktop-portal
 ```
 
 Arch includes development headers in the library packages; there are no separate `-dev`
@@ -61,14 +67,18 @@ Build dependencies:
 ```sh
 sudo dnf install gcc gcc-c++ make pkgconf-pkg-config curl ca-certificates \
   libimobiledevice-devel libplist-devel libusbmuxd-devel \
-  libimobiledevice-utils usbmuxd avahi-tools
+  libimobiledevice-utils usbmuxd avahi-tools \
+  libX11-devel libXi-devel libXcursor-devel libXrandr-devel libxkbcommon-devel \
+  wayland-devel mesa-libEGL-devel mesa-libGL-devel
 ```
 
 Runtime-only installation:
 
 ```sh
 sudo dnf install libimobiledevice libplist libusbmuxd \
-  libimobiledevice-utils usbmuxd avahi-tools
+  libimobiledevice-utils usbmuxd avahi-tools \
+  libX11 libXi libXcursor libXrandr libxkbcommon libxkbcommon-x11 \
+  wayland-libs mesa-libEGL mesa-libGL xdg-desktop-portal
 ```
 
 Fedora splits the command-line diagnostics into `libimobiledevice-utils` and development
@@ -78,6 +88,27 @@ Sources: [libimobiledevice packages](https://packages.fedoraproject.org/pkgs/lib
 [CLI utilities](https://packages.fedoraproject.org/pkgs/libimobiledevice/libimobiledevice-utils/),
 [libplist-devel](https://packages.fedoraproject.org/pkgs/libplist/libplist-devel/),
 [libusbmuxd-devel](https://packages.fedoraproject.org/pkgs/libusbmuxd/libusbmuxd-devel/).
+
+## Desktop session and file pickers
+
+The GUI uses eframe 0.33, OpenGL and X11/Wayland. Run it inside your normal desktop
+session, with its working graphics driver. `aircard` remains usable without a display.
+The Browse buttons use the XDG desktop portal; a Flatpak runtime is not involved.
+Install your desktop's portal backend if missing: GNOME commonly uses
+`xdg-desktop-portal-gnome`, KDE uses its KDE backend (named `xdg-desktop-portal-kde`
+on Arch/Fedora and `xdg-desktop-portal-kde` on Debian), and other desktops can use
+`xdg-desktop-portal-gtk`. These backend packages are available through apt/pacman/dnf.
+Use the backend recommended by your desktop; entering paths directly also works.
+
+```sh
+systemctl --user status xdg-desktop-portal --no-pager
+```
+
+Graphics/file-picker package references:
+[Debian libxkbcommon](https://packages.debian.org/trixie/libxkbcommon0),
+[Debian portal backend](https://packages.debian.org/trixie/xdg-desktop-portal-gtk),
+[Arch libxkbcommon](https://archlinux.org/packages/extra/x86_64/libxkbcommon/),
+[Fedora Mesa](https://packages.fedoraproject.org/pkgs/mesa/).
 
 ## Rust and build
 
@@ -91,6 +122,7 @@ rustup override set stable
 pkg-config --modversion libimobiledevice-1.0 libplist-2.0 libusbmuxd-2.0
 cargo build --locked --workspace --release
 ./target/release/aircard --help
+./target/release/aircard-gui
 ```
 
 Required native minimums are libimobiledevice 1.3.0, libplist 2.2.0 and libusbmuxd 2.0.0.
@@ -104,7 +136,28 @@ Optional per-user installation:
 
 ```sh
 install -Dm755 target/release/aircard "$HOME/.local/bin/aircard"
+install -Dm755 target/release/aircard-gui "$HOME/.local/bin/aircard-gui"
 ```
+
+Keep both executables together: the GUI starts the adjacent CLI worker. If they must
+live in different directories, pass `aircard-gui --cli /absolute/path/to/aircard`.
+Do not launch the GUI as root. It does not install a daemon or persist device identifiers.
+
+## Native archives
+
+```sh
+./scripts/package-native.sh manjaro-local
+# Produces dist/aircard-linux-0.1.0-manjaro-local-<architecture>.tar.gz and .sha256
+```
+
+Packaging additionally needs Python 3, GNU tar, gzip and binutils/readelf. The script
+builds with Cargo.lock, includes the CLI, GUI, license notices, docs and BUILD-INFO, and
+refuses to overwrite an existing archive. It explicitly excludes private device data and
+JSON evidence. Verify the adjacent checksum before extracting, then run `./aircard-gui`
+from the extracted directory. Never mix binaries from different releases.
+CI creates separate Ubuntu 22.04/24.04 archives; these artifacts are not an automatic
+GitHub Release. Other distributions can build with the guide above. Local verification
+was on Manjaro; cross-distribution build availability is not hardware compatibility proof.
 
 ## USB and Wi-Fi diagnostics
 
@@ -138,10 +191,10 @@ as a blind workaround; inspect discovery/backend support first.
 Remove only the executables you installed, for example:
 
 ```sh
-rm "$HOME/.local/bin/aircard"
+rm "$HOME/.local/bin/aircard" "$HOME/.local/bin/aircard-gui"
 cargo clean
 ```
 
-AirCard does not install a system service. Delete your own exported previews/snapshots and
+AirCard does not install a system service. Delete your own exported previews/card backups and
 redirected logs when no longer needed. Native library and usbmuxd packages may be shared
 with other software; uninstall those only through your package manager if no longer used.

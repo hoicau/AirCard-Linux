@@ -2,8 +2,9 @@
 //! Platform-independent data validation. No device or GUI dependencies.
 pub mod assets;
 pub mod books;
-pub mod passthm;
+pub mod customization;
 pub mod scanner;
+pub mod staging;
 use plist::Value;
 use serde::{Deserialize, Serialize};
 use std::io::Cursor;

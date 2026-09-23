@@ -1,148 +1,129 @@
 # AirCard-Linux
 
-Hardware JSON reports under `docs/evidence/` are local-only and excluded from Git history.
-Public research notes retain aggregate results; no evidence JSON is distributed.
+Native Linux **Wallet card artwork customization**, with a Rust CLI and egui desktop app.
+Prepare an image, select a card on your paired iPhone, apply the background, and restore
+its original artwork from a private local backup.
 
-> **Current checkpoint (2026-09-22):** USB ReadyForSync and controlled single-Book sync,
-> byte verification and full restore have succeeded. Stage 4 offline resources and
-> snapshot/recovery CLI are implemented; final feature acceptance remains incomplete.
-> See [current status and commands](docs/STATUS.md) and
-> [Debian/Ubuntu, Arch/Manjaro and Fedora installation guide](docs/INSTALL.md).
-> The earlier PoC report below is historical and predates the authorized Grappa experiment.
+USB card application, exact readback, independent backup/restore and recovery after a
+forced process interruption have been verified on one iOS 27.0 iPhone. Its owner confirmed
+both the changed Wallet artwork and the restored original. See [verification status](docs/STATUS.md)
+for the tested boundary; other devices and Wi-Fi remain unverified.
 
-**Experimental native Linux CLI PoC.** Work only with your own explicitly authorized,
-already paired iPhone. This implementation never initiates pairing or bypasses trust.
+The product scope is card artwork only. Device discovery, Wallet scanning, image previews,
+backups and recovery support that workflow. AirTraffic/Books synchronization is an internal
+transport, with the original Books state restored after each operation. No Apple DLLs or
+frameworks are loaded or distributed. Original MIT licensing and provenance are retained.
 
-On one **iOS 27.0** device, USB enumeration, existing-pair lockdownd sessions, TLS syslog,
-AFC list/write/read/cleanup, and incoming ATC `SyncAllowed` were observed.
-The native HostInfo/RequestingSync handshake is implemented behind `--apply`, but the
-test phone returns `SyncFailed / ErrorCode=4`; **ReadyForSync is not hardware-verified**.
-Wi-Fi routing is implemented for network entries supplied by usbmuxd, but **Wi-Fi has
-not passed hardware acceptance** on this host. No full sync, Wallet/passcode modification,
-Books backup/restore, GUI, AppImage or Flatpak is implemented.
+## Install and launch
 
-The branch descends from [AirCard-Windows v1.2.2](https://github.com/Lumid-Off/AirCard-Windows/tree/d41aa1f2e1012bcd0af25d26f7579f0c5af645f7).
-The original MIT license and reference history are retained. Apple DLLs/frameworks are
-not dependencies. See [provenance](docs/PROVENANCE.md).
-
-## Build
-
-Rust stable (edition 2024), a C compiler, pkg-config and native development libraries:
+Follow the [Debian/Ubuntu, Arch Linux and Fedora dependency guide](docs/INSTALL.md).
+Build with Rust stable (minimum 1.88) and the checked-in lockfile:
 
 ```sh
-# Debian / Ubuntu
-sudo apt-get install build-essential pkg-config libimobiledevice-dev libplist-dev libusbmuxd-dev libimobiledevice-utils usbmuxd avahi-utils
-# Arch / Manjaro
-sudo pacman -S --needed base-devel pkgconf libimobiledevice libplist libusbmuxd usbmuxd avahi
-
-rustup toolchain install stable --profile minimal --component rustfmt --component clippy
 cargo build --locked --workspace --release
-./target/release/aircard --help
+./target/release/aircard-gui
 ```
 
-Minimum native versions: libimobiledevice 1.3.0, libplist 2.2.0, libusbmuxd 2.0.0.
-The lockfile fixes Rust dependency versions. Ubuntu 22.04/24.04 stable CI runs without
-hardware. Local validation was performed on Manjaro, not in those Ubuntu runners.
+Keep `aircard` and `aircard-gui` together. Run as your normal user. The CLI also works
+without a desktop session. Native `.tar.gz` binaries include dependency/build information
+and checksums; use a build compatible with your distribution's glibc and native libraries.
 
-```sh
-cargo fmt --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cargo build --workspace --release
-```
+## Apply a card background
+
+1. Connect and unlock your own already paired iPhone. Keep Books closed.
+2. In **Card artwork**, open PNG/JPEG/WebP and prepare the centered 1536 × 969 preview.
+3. In **Apply & restore**, select the device and transport. Start a scan, then open Wallet
+   and select the intended card. Choose its detected identifier and close Wallet.
+4. Choose a **new backup file**, an **unused recovery directory**, and your private
+   84-byte sync token. [Token setup](docs/SYNC-TOKEN.md) describes the public implementation
+   used for compatibility testing; the application does not fetch or distribute a token table.
+5. Review the target card and device, then confirm Apply. Reopen Wallet after completion.
+
+AirCard replaces existing background resources only: `cardBackgroundCombined@3x.png`,
+`cardBackgroundCombined@2x.png` and `cardBackgroundCombined.pdf`. It invalidates the
+selected card's generated display caches. Card account details and `pass.json` are outside
+the writable target set. The GUI rejects an image changed after preview approval.
+
+## Restore and recover
+
+**Restore** uses the original private backup, the same device, and a new recovery directory.
+Close Wallet and Books, review the restore plan and confirm. Reopen Wallet when complete.
+Keep the backup until you no longer need to restore that artwork.
+
+**Recover** resumes an interrupted operation from its existing recovery directory. Keep
+that directory when a device disconnects or recovery fails. Reconnect the original device,
+unlock it, close Wallet/Books and run Recover before another operation. Recovery rolls back
+an unfinished apply. If application and durable backup already completed, it finishes
+cleanup and preserves the committed result. Use Restore to undo a completed application.
+
+Cancellation requests restoration and allows bounded cleanup. A watchdog may terminate a
+stalled native call; the journal then remains available for recovery. Do not manually delete
+an incomplete recovery directory. Concurrent unrelated artwork changes stop recovery with
+a conflict rather than being silently discarded. Display caches are derived data and can be
+regenerated by Wallet.
 
 ## CLI
 
-All device commands accept `--udid <UDID>` and `--transport usb|wifi`. Without selectors,
-exactly one route must be available; ambiguous routes are an error. There is no automatic
-USB fallback for a Wi-Fi request. `--timeout` bounds the operation with a separate native
-worker watchdog (plus five seconds of shutdown/setup allowance).
+Device operations accept `--udid <UDID>` and `--transport usb|wifi`. Ambiguous selection
+fails and Wi-Fi never falls back to USB. Device identifiers and card hashes are redacted
+unless explicitly requested. Commands emit newline-delimited JSON with stage and error details.
 
 ```sh
-cargo run -p cli -- devices
-cargo run -p cli -- devices --show-identifiers   # local use; keep identifiers private
-cargo run -p cli -- probe --transport usb
-cargo run -p cli -- syslog --transport usb --duration 30
-cargo run -p cli -- scan --transport usb --duration 30
-cargo run -p cli -- snapshot --transport usb
-cargo run -p cli -- atc-smoke --transport usb --timeout 5
-cargo run -p cli -- atc-ready --transport usb             # plan only, no device access
-cargo run -p cli -- atc-ready --transport usb --timeout 10 --apply  # handshake only
-cargo run -p cli -- afc-list --transport usb
-cargo run -p cli -- afc-self-test --transport usb          # dry-run
-cargo run -p cli -- afc-self-test --transport usb --apply  # controlled write/read/delete
-cargo run -p cli -- probe --transport wifi
+./target/release/aircard devices
+./target/release/aircard scan --transport usb --duration 30 --show-hashes
+./target/release/aircard prepare-card artwork.png --preview preview.png
+
+mkdir -p .local
+# Validate the plan offline first; add --apply to perform it.
+./target/release/aircard card-apply artwork.png --card-hash '<HASH>' \
+  --backup .local/card-original.json --journal .local/card-transaction \
+  --grappa-token .local/token.bin --transport usb --timeout 25
+
+./target/release/aircard card-restore .local/card-original.json \
+  --journal .local/restore-transaction --grappa-token .local/token.bin \
+  --transport usb --timeout 25 --apply
+
+./target/release/aircard card-recover .local/card-transaction \
+  --grappa-token .local/token.bin --transport usb --timeout 25 --apply
 ```
 
-- Output is JSON Lines. Logs contain stages, native error domain/code, elapsed time and byte counts. Default device identifiers, card hashes, filenames and raw syslog text are suppressed.
-- `syslog` continuously receives for its requested duration (up to 3600 seconds). `--raw` explicitly prints potentially private syslog to your terminal; do not commit it. No log file is created automatically.
-- `scan` ports the upstream Wallet keyword/base64/entropy/dummy-hash filters. `--show-hashes` explicitly reveals matched hashes locally. Real Wallet card detection is still unverified: observed syslog sessions had no matching card events.
-- `snapshot` emits **diagnostic metadata only**, not a complete or restorable Books snapshot. State-changing synchronization is gated on a future real backup/restore implementation.
-- `atc-smoke` starts `com.apple.atc` and honors the TLS requirement, then receives only. The report distinguishes a validated incoming `SyncAllowed` envelope from a full protocol handshake. Exit 0 means the stage-2 receive-only target passed; it does not mean `ReadyForSync` or synchronization succeeded. Exit 3 means ATC startup or first-message validation failed. Other failures use exit 1, argument errors 2, watchdog 124, cancellation 130.
-- `atc-ready` prints a dry-run plan without accessing the device. `--apply` opens the normal paired/TLS service, sends HostInfo and RequestingSync(Book), handles Ping/Pong, and closes on an exact ReadyForSync/session 1 or failure. No metadata or assets are sent. It never suppresses SyncFailed. The current test device rejects session 1 with error 4; an unmet Grappa requirement is suspected, not proven as the definition of that code. See [handshake research and evidence](docs/READY-FOR-SYNC.md). Applied success exits 0, protocol rejection 3, pre-service selection/pairing errors 1, cancellation 130.
-- `afc-read <relative-path>` reads at most 1 MiB and reports only its length. Paths reject traversal, drive prefixes, control characters and symlink components. AFC operations remain inside the normal media service scope.
-- `afc-self-test --apply` creates a unique `AirCard-Linux-PoC-*` directory, writes a 26-byte synthetic file, verifies it, and removes both. It refuses existing targets. No other CLI command writes device files. Cleanup errors are retained alongside the original error. A disconnect or forced termination can prevent remote cleanup; the emitted scratch path identifies exactly what must be removed after reconnection, through a normal AFC client. Do not delete unrelated directories. No rollback or recovery claim is made for AirTraffic sync.
+`prepare-card` can additionally export a resource ZIP with `--output wallet.zip`.
+`probe` checks the selected paired device's AFC connection without writing.
+All card-changing commands default to dry-run and require `--apply`.
 
-For a reproducible sanitized evidence artifact:
+## Compatibility and limits
 
-```sh
-python3 scripts/verify-device.py --binary target/release/aircard --output /tmp/aircard-check.json
-# Include the explicitly authorized controlled AFC write test:
-python3 scripts/verify-device.py --binary target/release/aircard --apply --output /tmp/aircard-write-check.json
-# Review aggregate results, then delete temporary reports when finished.
-rm /tmp/aircard-check.json /tmp/aircard-write-check.json
-```
-
-## Current acceptance and stopping point
-
-| Phase | Status |
+| Environment | Verification |
 | --- | --- |
-| 0: repository/build/CI | Implemented; four local checks pass; hosted CI awaits push |
-| 1: Linux USB | Real iOS 27.0 device verified; syslog counters retained as sanitized evidence |
-| 1: Wi-Fi | Strict route selection implemented; no discovered network entry; acceptance incomplete |
-| 2: ATC | Service/TLS and incoming little-endian binary plist `SyncAllowed` verified on USB |
-| ReadyForSync handshake | Native client and mock tests implemented; real USB returns SyncFailed/code 4 |
-| 3: single-asset sync | Blocked: actual ReadyForSync not reached; Grappa interoperability unresolved |
-| 4: assets and full snapshots | Deferred behind the protocol gate; original pure Rust sources remain in reference history |
-| 5: GUI/distribution | Not started |
+| Linux x86_64, USB, iOS 27.0 | Card application, owner visual check, restore and interrupted recovery verified |
+| Paired Wi-Fi | Explicit route supported; hardware acceptance pending |
+| Other iOS versions/cards | Unverified; resource layout and private services can differ |
+| Ubuntu 22.04/24.04 | CI build/test/package matrix; no iPhone required by CI |
+| Debian, Arch derivatives, Fedora | Dependency guides supplied; build locally for matching libraries |
 
-See [the original passive report](docs/AIRTRAFFIC-RESEARCH.md),
-[the current handshake report](docs/READY-FOR-SYNC.md), and
-sanitized hardware evidence (local-only report).
-The upstream customization mechanism depends on escaping the expected asset directory.
-This PoC preserves the requested path-validation/security boundary; it does not expose
-that mechanism. Future resource generation must remain separate from device writes.
+The internal Books safeguard is bounded to 1024 entries, 16 MiB per file and 64 MiB total.
+Larger or concurrently changing libraries are rejected before card changes. Sync manifests
+are bounded to 128 entries including preserved books. Original background/cache files are
+limited to 16 MiB each. Pairing and service TLS use libimobiledevice and remain required.
+A signed Wallet update or iOS update may replace custom artwork or change compatibility.
 
-## Device and service diagnostics
+## Development and binary packaging
 
 ```sh
-systemctl status usbmuxd --no-pager
-ls -l /run/usbmuxd
-idevice_id -l
-idevice_id -n
-avahi-browse --resolve --terminate _apple-mobdev2._tcp
+cargo fmt --check
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked --workspace
+cargo build --locked --workspace --release
+./scripts/package-native.sh linux-local
 ```
 
-The last commands may display private device/network identifiers: inspect locally.
-Connect and unlock the phone, use an existing trusted host pairing, and check installed
-udev rules if USB devices are absent. On distributions with an on-demand static usbmuxd
-service, attach the device before diagnosing an inactive daemon. Avoid running multiple
-competing daemons or replacing pairing files. Pair manually outside this tool if needed.
+Core data/image logic is platform-independent. `device` owns the Linux backend,
+`linux-adapter` isolates native FFI, `airtraffic` owns framing/state machines, and CLI/GUI
+own transaction policy and local files. [Protocol notes](docs/AIRTRAFFIC-RESEARCH.md) and
+[transaction/recovery design](docs/WALLET-TRANSACTIONS.md) describe observed behavior.
 
-Wi-Fi requires a reachable paired device with Wi-Fi sync advertised, plus a mux backend
-that exposes network records. Standard Linux usbmuxd builds may enumerate USB only;
-Avahi discovery by itself does not inject network devices into libimobiledevice.
-This PoC does not replace usbmuxd or install an unverified network proxy. Empty network
-results are reported as `NoDevice`, never silently retried over USB.
-
-AFC normally requests no service TLS on the tested device. The adapter fails closed if
-AFC requests TLS on a backend whose public constructor cannot propagate TLS failure.
-ATC and syslog explicitly verify TLS success using public connection APIs.
-
-## Uninstall and privacy
-
-No install step, daemon, persistent device backup, or application data directory is
-created. Remove your own copied binary and build output (`cargo clean`) to uninstall.
-Remove any manually redirected private logs, diagnostic snapshots or temporary evidence.
-System Rust/native packages are shared dependencies and should be removed only if you
-no longer need them for other projects. Test scripts never save certificates or pair records.
+Packaging uses an explicit file allowlist. Local device evidence, card identifiers, tokens,
+backups and journals are excluded from Git and archives. Logs contain counts and protocol
+state, not raw device syslog or pairing material. Remove completed temporary resources and
+private test data after validation. See [installation and uninstall](docs/INSTALL.md) and
+[provenance](docs/PROVENANCE.md).

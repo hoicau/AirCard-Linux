@@ -11,6 +11,7 @@ use std::{
 use thiserror::Error;
 pub mod handshake;
 pub mod observation;
+pub mod streaming_zip;
 
 #[derive(Debug, Error)]
 pub enum Error {

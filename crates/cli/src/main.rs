@@ -1,8 +1,9 @@
 #![forbid(unsafe_code)]
-mod books;
-mod local;
+mod customization;
+mod wallet;
+use cli::local;
 mod resources;
-use airtraffic::{AirTrafficClient, PassiveClient, ReceiveTransport};
+use airtraffic::ReceiveTransport;
 use clap::{Parser, Subcommand, ValueEnum};
 use device::{
     AfcAccess, DeviceProvider, DuplexServiceTransport, LinuxDeviceProvider, ServiceTransport,
@@ -36,14 +37,14 @@ impl From<Route> for Transport {
 #[command(
     name = "aircard",
     version,
-    about = "Experimental native Linux device and offline resource tools. Device writes require --apply."
+    about = "Wallet card artwork, private backups and recovery. Device writes require --apply."
 )]
 struct Args {
     #[arg(long, global = true)]
     udid: Option<String>,
     #[arg(long, value_enum, global = true)]
     transport: Option<Route>,
-    /// Per-command deadline, including a native-call watchdog (1..300 seconds).
+    /// Per-service deadline (1..300 seconds); the transaction watchdog allows bounded recovery.
     #[arg(long, default_value_t = 15, value_parser = clap::value_parser!(u64).range(1..=300), global = true)]
     timeout: u64,
     #[command(subcommand)]
@@ -59,36 +60,51 @@ enum Command {
         #[arg(long)]
         preview: Option<std::path::PathBuf>,
     },
-    /// Offline bounded passthm conversion; --preview exports normalized keypad PNGs in ZIP.
-    PrepareTheme {
-        input: std::path::PathBuf,
+    /// Controlled Wallet artwork test with private originals, cache invalidation and automatic restore.
+    CardTest {
         #[arg(long)]
-        output: Option<std::path::PathBuf>,
+        card_hash: String,
         #[arg(long)]
-        preview: Option<std::path::PathBuf>,
-        #[arg(long, default_value="en", value_parser=["en","ru","uk","ja","all"])]
-        language: String,
-        #[arg(long, default_value_t=10, value_parser=clap::value_parser!(u8).range(8..=10))]
-        telephony: u8,
+        journal: std::path::PathBuf,
         #[arg(long)]
-        bold: bool,
-    },
-    /// Save a full bounded Books snapshot to a new private local file (read-only device access).
-    BooksSnapshot { output: std::path::PathBuf },
-    /// Validate and preview a Books backup offline. --apply restores on its original device.
-    BooksRestore {
-        input: std::path::PathBuf,
+        grappa_token: std::path::PathBuf,
+        #[arg(long,default_value_t=180,value_parser=clap::value_parser!(u64).range(0..=300))]
+        hold_seconds: u64,
         #[arg(long)]
         apply: bool,
     },
-    /// Controlled synthetic Book sync, byte verification and automatic full restore.
-    BooksTest {
-        /// New private recovery journal; deleted only after verified restoration.
+    /// Apply an image to the selected Wallet card and save a private restore backup.
+    CardApply {
+        input: std::path::PathBuf,
+        /// Fail if the prepared PNG differs from the preview approved in the GUI.
+        #[arg(long)]
+        expected_artwork_sha256: Option<String>,
+        #[arg(long)]
+        card_hash: String,
+        #[arg(long)]
+        backup: std::path::PathBuf,
         #[arg(long)]
         journal: std::path::PathBuf,
-        /// Caller-supplied 84-byte Grappa token, private local file. Never logged or shipped.
         #[arg(long)]
-        grappa_token: Option<std::path::PathBuf>,
+        grappa_token: std::path::PathBuf,
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Restore a card backup on its original paired device.
+    CardRestore {
+        input: std::path::PathBuf,
+        #[arg(long)]
+        journal: std::path::PathBuf,
+        #[arg(long)]
+        grappa_token: std::path::PathBuf,
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Recover an interrupted Wallet operation using its private journal directory.
+    CardRecover {
+        journal: std::path::PathBuf,
+        #[arg(long)]
+        grappa_token: std::path::PathBuf,
         #[arg(long)]
         apply: bool,
     },
@@ -99,13 +115,6 @@ enum Command {
     },
     /// Check existing pairing, iOS version and AFC access without writing.
     Probe,
-    /// Bounded syslog capture. Output is counts by default; --raw prints private device logs locally.
-    Syslog {
-        #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=3600))]
-        duration: u64,
-        #[arg(long)]
-        raw: bool,
-    },
     /// Apply upstream Wallet hash filters. Hashes are suppressed unless explicitly requested.
     Scan {
         #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=3600))]
@@ -113,42 +122,13 @@ enum Command {
         #[arg(long)]
         show_hashes: bool,
     },
-    /// Emit diagnostic metadata, not a restorable Books backup.
-    Snapshot,
-    /// Start com.apple.atc, receive only, report lengths and unknown framing. Exit 3 if unvalidated.
-    AtcSmoke,
-    /// Attempt HostInfo/RequestingSync and stop at ReadyForSync. No metadata or asset transfer.
-    AtcReady {
-        #[arg(long)]
-        grappa_token: Option<std::path::PathBuf>,
-        /// Required to open a device sync session; otherwise only show the plan.
-        #[arg(long)]
-        apply: bool,
-    },
-    /// List AFC entries. Only count is printed by default.
-    AfcList {
-        #[arg(default_value = ".")]
-        path: String,
-        #[arg(long)]
-        show_names: bool,
-    },
-    /// Read a bounded regular AFC file; report only byte count.
-    AfcRead {
-        path: String,
-        #[arg(long, default_value_t = 1048576, value_parser = clap::value_parser!(u64).range(1..=1048576))]
-        limit: u64,
-    },
-    /// Dry-run or create/read/remove a controlled scratch asset. Requires --apply for device writes.
-    AfcSelfTest {
-        #[arg(long)]
-        apply: bool,
-    },
 }
 fn emit(value: &impl serde::Serialize) {
     println!(
         "{}",
         serde_json::to_string(value).expect("serializable event")
     );
+    let _ = io::stdout().flush();
 }
 fn error(e: &device::Error) {
     emit(&json!({"event":"error", "error":e}));
@@ -177,10 +157,11 @@ fn watchdog(args: &Args, cancel: &AtomicBool) -> u8 {
         }
     };
     let seconds = match &args.command {
-        Command::Syslog { duration, .. } | Command::Scan { duration, .. } => {
-            *duration + args.timeout + 5
+        Command::Scan { duration, .. } => *duration + args.timeout + 5,
+        Command::CardTest { hold_seconds, .. } => args.timeout * 30 + hold_seconds + 90,
+        Command::CardApply { .. } | Command::CardRestore { .. } | Command::CardRecover { .. } => {
+            args.timeout * 30 + 90
         }
-        Command::BooksTest { .. } | Command::BooksRestore { .. } => args.timeout + 35,
         _ => args.timeout + 5,
     };
     let start = Instant::now();
@@ -201,7 +182,18 @@ fn watchdog(args: &Args, cancel: &AtomicBool) -> u8 {
                 nix::sys::signal::Signal::SIGINT,
             );
             let grace = Instant::now();
-            while grace.elapsed() < Duration::from_secs(2) {
+            let cleanup_grace = if matches!(
+                args.command,
+                Command::CardTest { .. }
+                    | Command::CardApply { .. }
+                    | Command::CardRestore { .. }
+                    | Command::CardRecover { .. }
+            ) {
+                90
+            } else {
+                2
+            };
+            while grace.elapsed() < Duration::from_secs(cleanup_grace) {
                 if matches!(child.try_wait(), Ok(Some(_))) {
                     break;
                 }
@@ -212,7 +204,7 @@ fn watchdog(args: &Args, cancel: &AtomicBool) -> u8 {
             }
             let _ = child.wait();
             emit(
-                &json!({"event":"error","kind":if cancel.load(Ordering::Relaxed){"cancelled"}else{"native_call_deadline"},"stage":"worker","hint":"Inspect the last stage event. For an interrupted books-test, keep its journal and use books-restore JOURNAL --apply on the original device; AFC self-test may require scratch cleanup."}),
+                &json!({"event":"error","kind":if cancel.load(Ordering::Relaxed){"cancelled"}else{"native_call_deadline"},"stage":"worker","hint":"Keep the private transaction directory. Use card-recover with the original device before retrying."}),
             );
             return if cancel.load(Ordering::Relaxed) {
                 130
@@ -227,14 +219,8 @@ fn run(args: &Args, cancel: &AtomicBool) -> device::Result<u8> {
     if let Some(code) = resources::run(&args.command)? {
         return Ok(code);
     }
-    if let Some(code) = books::offline(&args.command)? {
+    if let Some(code) = wallet::offline(&args.command)? {
         return Ok(code);
-    }
-    if matches!(args.command, Command::AtcReady { apply: false, .. }) {
-        emit(
-            &json!({"event":"dry_run","applied":false,"plan":["verify existing host pairing and selected transport","start com.apple.atc with required TLS","receive SyncAllowed","send HostInfo on session 0","send RequestingSync(Book) on session 1","answer Ping with Pong","stop on ReadyForSync or any failure","close service"],"metadata_or_assets_sent":false}),
-        );
-        return Ok(0);
     }
     let provider = LinuxDeviceProvider;
     emit(&json!({"event":"stage","stage":"enumerate"}));
@@ -267,15 +253,14 @@ fn run(args: &Args, cancel: &AtomicBool) -> device::Result<u8> {
     let info = provider.pairing(&selected)?;
     emit(&json!({"event":"paired","info":info}));
     match &args.command {
-        Command::Devices { .. } | Command::PrepareCard { .. } | Command::PrepareTheme { .. } => {
-            unreachable!()
+        Command::Devices { .. } | Command::PrepareCard { .. } => unreachable!(),
+        Command::CardTest { .. }
+        | Command::CardApply { .. }
+        | Command::CardRestore { .. }
+        | Command::CardRecover { .. } => {
+            return wallet::run(&args.command, &provider, &selected, args.timeout, cancel);
         }
-        Command::BooksSnapshot { .. }
-        | Command::BooksRestore { .. }
-        | Command::BooksTest { .. } => {
-            return books::run(&args.command, &provider, &selected, args.timeout, cancel);
-        }
-        Command::Probe | Command::Snapshot => {
+        Command::Probe => {
             emit(&json!({"event":"stage","stage":"start_afc"}));
             let mut afc = provider.afc(&selected)?;
             let snapshot = aircard_core::DiagnosticSnapshot {
@@ -287,84 +272,7 @@ fn run(args: &Args, cancel: &AtomicBool) -> device::Result<u8> {
                 afc_root_entries: afc.list(".")?.len(),
                 afc_tls: afc.tls(),
             };
-            emit(&snapshot);
-        }
-        Command::AtcSmoke => {
-            emit(
-                &json!({"event":"stage","stage":"start_service","service":"com.apple.atc","state":"Connecting"}),
-            );
-            let service = match device::open_verified_service(&provider, &selected, "com.apple.atc")
-            {
-                Ok((_, service)) => service,
-                Err(e) => {
-                    emit(
-                        &json!({"event":"atc_smoke","state":"Failed","failed_from":"Connecting","service_started":false,"bytes_received":0,"first_direction":"unknown","framing":"unconfirmed","protocol_validated":false,"error":e}),
-                    );
-                    return Ok(3);
-                }
-            };
-            emit(&json!({"event":"service_started","service":"com.apple.atc","tls":service.tls()}));
-            let report = PassiveClient {
-                transport: Bridge(service),
-            }
-            .smoke(Duration::from_secs(args.timeout), &|| {
-                cancel.load(Ordering::Relaxed)
-            });
-            let code = if report.first_message_validated { 0 } else { 3 };
-            emit(&report);
-            return Ok(code);
-        }
-        Command::AtcReady {
-            apply: true,
-            grappa_token,
-        } => {
-            emit(
-                &json!({"event":"stage","stage":"start_service","service":"com.apple.atc","state":"Connecting"}),
-            );
-            let service = match device::open_verified_service(&provider, &selected, "com.apple.atc")
-            {
-                Ok((_, service)) => service,
-                Err(e) => {
-                    emit(
-                        &json!({"event":"atc_ready_complete","state":"Failed","ready_for_sync":false,"stage":"start_service","error":e}),
-                    );
-                    return Ok(3);
-                }
-            };
-            emit(&json!({"event":"service_started","service":"com.apple.atc","tls":service.tls()}));
-            let library_id =
-                std::fs::read_to_string("/proc/sys/kernel/random/uuid").map_err(|_| {
-                    device::Error::new(device::ErrorKind::Native, "generate_library_id")
-                })?;
-            let report = airtraffic::handshake::HandshakeClient {
-                transport: Bridge(service),
-            }
-            .ready_authenticated(
-                library_id.trim(),
-                local::token(grappa_token.as_deref())?.as_deref(),
-                Duration::from_secs(args.timeout),
-                &|| cancel.load(Ordering::Relaxed),
-                emit,
-            );
-            let code = if report.ready_for_sync {
-                0
-            } else if report
-                .failure
-                .as_ref()
-                .is_some_and(|f| f.kind == airtraffic::handshake::FailureKind::Cancelled)
-            {
-                130
-            } else {
-                3
-            };
-            emit(&report);
-            return Ok(code);
-        }
-        Command::AtcReady { apply: false, .. } => {
-            unreachable!("dry run handled before device access")
-        }
-        Command::Syslog { duration, raw } => {
-            capture(&provider, &selected, *duration, *raw, false, false, cancel)?
+            emit(&json!({"event":"probe_complete","diagnostics":snapshot}));
         }
         Command::Scan {
             duration,
@@ -378,43 +286,6 @@ fn run(args: &Args, cancel: &AtomicBool) -> device::Result<u8> {
             *show_hashes,
             cancel,
         )?,
-        Command::AfcList { path, show_names } => {
-            let names = provider.afc(&selected)?.list(path)?;
-            emit(
-                &json!({"event":"afc_list","count":names.len(),"names":if *show_names{Some(names)}else{None}}),
-            );
-        }
-        Command::AfcRead { path, limit } => {
-            let data = provider.afc(&selected)?.read(path, *limit as usize)?;
-            emit(&json!({"event":"afc_read","bytes":data.len()}));
-        }
-        Command::AfcSelfTest { apply } => {
-            if !apply {
-                emit(
-                    &json!({"event":"dry_run","changes":["create unique AFC scratch directory","write 26-byte synthetic file","read and compare","remove file and directory"],"applied":false}),
-                );
-                return Ok(0);
-            }
-            let mut afc = provider.afc(&selected)?;
-            let root = format!(
-                "AirCard-Linux-PoC-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            );
-            emit(
-                &json!({"event":"scratch_created_plan","scratch_path":root,"cleanup":"remove roundtrip.txt then directory if interrupted"}),
-            );
-            let report =
-                device::self_test::roundtrip(&mut afc, &root, &|| cancel.load(Ordering::Relaxed))?;
-            let success = report.roundtrip_ok && report.cleanup_ok;
-            emit(&report);
-            if !success {
-                return Ok(1);
-            }
-        }
     }
     Ok(0)
 }

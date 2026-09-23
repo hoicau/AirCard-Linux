@@ -158,10 +158,7 @@ pub fn preserving_books_plist(
 }
 
 /// A valid, self-contained EPUB containing only synthetic text for end-to-end testing.
-pub fn synthetic_epub() -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
-    use std::io::{Cursor, Write};
-    use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
-    let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
+pub fn synthetic_epub_entries() -> Vec<crate::assets::Resource> {
     let entries = [
         ("mimetype", "application/epub+zip"),
         (
@@ -181,14 +178,27 @@ pub fn synthetic_epub() -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sy
             r#"<html xmlns="http://www.w3.org/1999/xhtml"><head><title>AirCard Linux controlled sync test</title></head><body><h1>AirCard Linux controlled sync test</h1><p>This is synthetic test data. The test restores the previous Books state and removes this asset.</p></body></html>"#,
         ),
     ];
-    for (name, data) in entries {
+    entries
+        .into_iter()
+        .map(|(name, data)| crate::assets::Resource {
+            relative_path: name.into(),
+            data: data.as_bytes().to_vec(),
+        })
+        .collect()
+}
+/// ZIP representation for interchange; normal iOS Books storage uses an expanded EPUB directory.
+pub fn synthetic_epub() -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    use std::io::{Cursor, Write};
+    use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
+    let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
+    for entry in synthetic_epub_entries() {
         zip.start_file(
-            name,
+            &entry.relative_path,
             SimpleFileOptions::default()
                 .compression_method(CompressionMethod::Stored)
                 .unix_permissions(0o600),
         )?;
-        zip.write_all(data.as_bytes())?;
+        zip.write_all(&entry.data)?;
     }
     Ok(zip.finish()?.into_inner())
 }

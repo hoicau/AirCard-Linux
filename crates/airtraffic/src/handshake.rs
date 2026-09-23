@@ -1,4 +1,4 @@
-//! Native bounded ATC handshake and single-asset client. Public protocol provenance: docs/READY-FOR-SYNC.md.
+//! Native bounded ATC handshake and single-asset client. Public protocol provenance: docs/AIRTRAFFIC-RESEARCH.md.
 //! Explicit caller-supplied Grappa data and manifest contents are never logged.
 use crate::{Event, ReceiveTransport, State, StateMachine, host_info};
 use aircard_core::{MAX_PLIST_BYTES, decode_binary, encode_binary};
@@ -228,7 +228,11 @@ pub struct SyncAsset {
 }
 impl SyncAsset {
     pub fn validate(&self) -> Result<(), FailureKind> {
-        aircard_core::safe_leaf(&self.asset_id).map_err(|_| FailureKind::InvalidInput)?;
+        if !aircard_core::staging::is_link_transfer(&self.asset_id, &self.asset_path)
+            && !aircard_core::customization::is_transfer(&self.asset_id, &self.asset_path)
+        {
+            aircard_core::safe_leaf(&self.asset_id).map_err(|_| FailureKind::InvalidInput)?;
+        }
         aircard_core::safe_relative_path(&self.asset_path)
             .map_err(|_| FailureKind::InvalidInput)?;
         if self.retained_ids.len() > 127
@@ -295,12 +299,22 @@ impl<T: DuplexTransport> HandshakeClient<T> {
         guard: &mut dyn FnMut() -> bool,
         log: impl FnMut(&LogEvent),
     ) -> HandshakeReport {
-        self.execute(options, Some(asset), guard, log)
+        self.execute(options, Some(std::slice::from_ref(asset)), guard, log)
+    }
+    /// Strict batch: all requested IDs must be present and all unrelated downloads are rejected.
+    pub fn synchronize_batch_checked(
+        self,
+        options: SyncOptions<'_>,
+        assets: &[SyncAsset],
+        guard: &mut dyn FnMut() -> bool,
+        log: impl FnMut(&LogEvent),
+    ) -> HandshakeReport {
+        self.execute(options, Some(assets), guard, log)
     }
     fn execute(
         self,
         options: SyncOptions<'_>,
-        asset: Option<&SyncAsset>,
+        asset: Option<&[SyncAsset]>,
         guard: &mut dyn FnMut() -> bool,
         mut log: impl FnMut(&LogEvent),
     ) -> HandshakeReport {
@@ -341,12 +355,27 @@ impl<T: DuplexTransport> HandshakeClient<T> {
             },
         };
         let result = (|| {
-            if let Some(asset) = asset {
-                asset.validate().map_err(|kind| run.failure(kind))?;
+            if let Some(assets) = asset {
+                if assets.is_empty() || assets.len() > 128 {
+                    return Err(run.failure(FailureKind::InvalidInput));
+                }
+                let mut ids = std::collections::BTreeSet::new();
+                for item in assets {
+                    item.validate().map_err(|kind| run.failure(kind))?;
+                    if !ids.insert(&item.asset_id)
+                        || item.retained_ids != assets[0].retained_ids
+                        || item
+                            .retained_ids
+                            .iter()
+                            .any(|id| assets.iter().any(|a| &a.asset_id == id))
+                    {
+                        return Err(run.failure(FailureKind::InvalidInput));
+                    }
+                }
             }
             run.handshake(library_id)?;
             if let Some(asset) = asset {
-                run.sync_asset(asset, guard)?;
+                run.sync_assets(asset, guard)?;
             }
             Ok(())
         })();
@@ -660,9 +689,9 @@ impl<T: DuplexTransport, F: FnMut(&LogEvent)> Run<'_, T, F> {
         self.report.ready_for_sync = true;
         Ok(())
     }
-    fn sync_asset(
+    fn sync_assets(
         &mut self,
-        asset: &SyncAsset,
+        assets: &[SyncAsset],
         guard: &mut dyn FnMut() -> bool,
     ) -> Result<(), Failure> {
         self.report.metadata_or_assets_sent = true;
@@ -683,31 +712,43 @@ impl<T: DuplexTransport, F: FnMut(&LogEvent)> Run<'_, T, F> {
             .params
             .get("AssetManifest")
             .ok_or_else(|| self.failure(FailureKind::ManifestRejected))?;
-        validate_selected_manifest(manifest, asset)
+        validate_batch_manifest(manifest, assets)
             .map_err(|_| self.failure(FailureKind::ManifestRejected))?;
         self.report.manifest_validated = true;
         self.advance(Event::ReceiveAssetManifest)?;
-        if !guard() {
-            return Err(self.failure(FailureKind::PreconditionChanged));
+        for (index, asset) in assets.iter().enumerate() {
+            if !guard() {
+                return Err(self.failure(FailureKind::PreconditionChanged));
+            }
+            self.send(
+                Command::FileComplete,
+                1,
+                Some(Dictionary::from_iter([
+                    ("AssetID", Value::String(asset.asset_id.clone())),
+                    ("Dataclass", Value::String("Book".into())),
+                    ("AssetPath", Value::String(asset.asset_path.clone())),
+                ])),
+            )?;
+            self.report.asset_completion_sent = true;
+            if index == 0 {
+                self.advance(Event::SendAssetCompleted)?;
+            }
+            if index + 1 < assets.len() {
+                let pause = Instant::now();
+                let delay = Duration::from_millis(if index == 0 { 400 } else { 60 });
+                while pause.elapsed() < delay {
+                    self.budget()?;
+                    thread::sleep(Duration::from_millis(5));
+                }
+            }
         }
-        self.send(
-            Command::FileComplete,
-            1,
-            Some(Dictionary::from_iter([
-                ("AssetID", Value::String(asset.asset_id.clone())),
-                ("Dataclass", Value::String("Book".into())),
-                ("AssetPath", Value::String(asset.asset_path.clone())),
-            ])),
-        )?;
-        self.report.asset_completion_sent = true;
-        self.advance(Event::SendAssetCompleted)?;
         self.wait_for(Command::SyncFinished, 1)?;
         self.advance(Event::ReceiveSyncFinished)?;
         Ok(())
     }
 }
 
-fn validate_selected_manifest(manifest: &Value, asset: &SyncAsset) -> Result<(), ()> {
+fn validate_batch_manifest(manifest: &Value, assets: &[SyncAsset]) -> Result<(), ()> {
     let root = manifest.as_dictionary().ok_or(())?;
     if root.len() != 1 {
         return Err(());
@@ -717,7 +758,7 @@ fn validate_selected_manifest(manifest: &Value, asset: &SyncAsset) -> Result<(),
         return Err(());
     }
     let mut seen = std::collections::BTreeSet::new();
-    let mut selected = false;
+    let mut selected = std::collections::BTreeSet::new();
     for item in books {
         let d = item.as_dictionary().ok_or(())?;
         let id = d.get("AssetID").and_then(Value::as_string).ok_or(())?;
@@ -725,17 +766,26 @@ fn validate_selected_manifest(manifest: &Value, asset: &SyncAsset) -> Result<(),
         if !seen.insert(id) {
             return Err(());
         }
-        if id == asset.asset_id {
+        if assets.iter().any(|a| id == a.asset_id) {
             if !download {
                 return Err(());
             }
-            selected = true;
-        } else if !asset.retained_ids.contains(id) || download {
+            selected.insert(id);
+        } else if !assets[0].retained_ids.contains(id) || download {
             return Err(());
         }
     }
-    if selected { Ok(()) } else { Err(()) }
+    if selected.len() == assets.len() {
+        Ok(())
+    } else {
+        Err(())
+    }
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+fn validate_selected_manifest(manifest: &Value, asset: &SyncAsset) -> Result<(), ()> {
+    validate_batch_manifest(manifest, std::slice::from_ref(asset))
+}

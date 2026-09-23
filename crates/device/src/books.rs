@@ -68,11 +68,38 @@ pub fn capture_stable(
     afc: &mut impl AfcAccess,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<BooksSnapshot> {
-    let first = capture(afc, cancelled)?;
-    if first != capture(afc, cancelled)? {
-        return Err(Error::new(ErrorKind::Conflict, "books_snapshot_not_stable"));
+    let mut previous = capture(afc, cancelled)?;
+    // ATC can finish before its known Books metadata writers become quiescent.
+    // Retry only metadata changes; never mask a concurrent user-content mutation.
+    for attempt in 0..10 {
+        let current = capture(afc, cancelled)?;
+        if previous == current {
+            return Ok(current);
+        }
+        if previous
+            .entries
+            .keys()
+            .chain(current.entries.keys())
+            .any(|path| {
+                previous.entries.get(path) != current.entries.get(path)
+                    && !TRACKED_METADATA.contains(&path.as_str())
+                    && !["Books", "Books/Sync", "Books/Sync/Database"].contains(&path.as_str())
+            })
+        {
+            return Err(Error::new(
+                ErrorKind::Conflict,
+                "books_content_changed_during_snapshot",
+            ));
+        }
+        previous = current;
+        if attempt < 9 {
+            if cancelled() {
+                return Err(Error::new(ErrorKind::Cancelled, "books_snapshot"));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
     }
-    Ok(first)
+    Err(Error::new(ErrorKind::Conflict, "books_snapshot_not_stable"))
 }
 
 pub const TRACKED_METADATA: &[&str] = &[
@@ -159,11 +186,32 @@ pub fn stage(
     cancelled: &dyn Fn() -> bool,
     mutated: &mut bool,
 ) -> Result<()> {
+    stage_payload(afc, snapshot, plan, Some(payload), cancelled, mutated)
+}
+/// Stage the fixed synthetic EPUB as an expanded directory, as used by Books.
+/// Public reference: rk700/book2pad 6bf346e, addbooks() EPUB branch.
+pub fn stage_epub(
+    afc: &mut impl AfcAccess,
+    snapshot: &BooksSnapshot,
+    plan: &TestPlan,
+    cancelled: &dyn Fn() -> bool,
+    mutated: &mut bool,
+) -> Result<()> {
+    stage_payload(afc, snapshot, plan, None, cancelled, mutated)
+}
+fn stage_payload(
+    afc: &mut impl AfcAccess,
+    snapshot: &BooksSnapshot,
+    plan: &TestPlan,
+    payload: Option<&[u8]>,
+    cancelled: &dyn Fn() -> bool,
+    mutated: &mut bool,
+) -> Result<()> {
     plan.validate()?;
     snapshot
         .validate()
         .map_err(|_| Error::new(ErrorKind::InvalidInput, "snapshot_validation"))?;
-    if payload.len() > MAX_FILE_BYTES {
+    if payload.is_some_and(|p| p.len() > MAX_FILE_BYTES) {
         return Err(Error::new(ErrorKind::InvalidInput, "payload_size"));
     }
     if &capture_stable(afc, cancelled)? != snapshot {
@@ -198,8 +246,8 @@ pub fn stage(
     let request = aircard_core::books::preserving_books_plist(snapshot, &plan.asset_id)
         .map(|(bytes, _)| bytes)
         .map_err(|_| Error::new(ErrorKind::InvalidInput, "books_request"))?;
-    afc.mkdir(&plan.scratch_root)?;
     *mutated = true;
+    afc.mkdir(&plan.scratch_root)?;
     for path in &plan.airlock_dirs_to_create {
         if !missing(afc, path)? {
             return Err(Error::new(ErrorKind::Conflict, "airlock_dir_race"));
@@ -211,14 +259,112 @@ pub fn stage(
             afc.mkdir(path)?;
         }
     }
-    afc.write(&plan.source(), payload)?;
-    if afc.read(&plan.source(), MAX_FILE_BYTES)? != payload {
-        return Err(Error::new(ErrorKind::Native, "source_verify"));
+    if let Some(payload) = payload {
+        afc.write(&plan.source(), payload)?;
+        if afc.read(&plan.source(), MAX_FILE_BYTES)? != payload {
+            return Err(Error::new(ErrorKind::Native, "source_verify"));
+        }
+    } else {
+        afc.mkdir(&plan.source())?;
+        for dir in ["META-INF", "OEBPS"] {
+            afc.mkdir(&format!("{}/{dir}", plan.source()))?;
+        }
+        for entry in aircard_core::books::synthetic_epub_entries() {
+            if cancelled() {
+                return Err(Error::new(ErrorKind::Cancelled, "stage_epub"));
+            }
+            afc.write(
+                &format!("{}/{}", plan.source(), entry.relative_path),
+                &entry.data,
+            )?;
+        }
+        if !synthetic_epub_matches(afc, &plan.source())? {
+            return Err(Error::new(ErrorKind::Native, "source_verify"));
+        }
     }
     if cancelled() {
         return Err(Error::new(ErrorKind::Cancelled, "stage"));
     }
     atomic_replace(afc, "Books/Sync/Books.plist", &request, &plan.temporary())
+}
+/// Replace only sync metadata with a request produced by the typed customization plan.
+pub fn stage_customization_request(
+    afc: &mut impl AfcAccess,
+    snapshot: &BooksSnapshot,
+    plan: &TestPlan,
+    request: &[u8],
+    cancelled: &dyn Fn() -> bool,
+) -> Result<()> {
+    plan.validate()?;
+    if &capture_stable(afc, cancelled)? != snapshot {
+        return Err(Error::new(
+            ErrorKind::Conflict,
+            "customization_snapshot_changed",
+        ));
+    }
+    if let Some(SnapshotEntry::File(data)) = snapshot.entries.get("Books/Sync/Books.plist")
+        && !aircard_core::books::sync_request_is_empty(data)
+            .map_err(|_| Error::new(ErrorKind::Conflict, "customization_pending_unreadable"))?
+    {
+        return Err(Error::new(
+            ErrorKind::Conflict,
+            "customization_pending_sync",
+        ));
+    }
+    aircard_core::decode_binary(request)
+        .map_err(|_| Error::new(ErrorKind::InvalidInput, "customization_request"))?;
+    for path in ["Books", "Books/Sync"] {
+        if missing(afc, path)? {
+            afc.mkdir(path)?;
+        }
+    }
+    atomic_replace(afc, "Books/Sync/Books.plist", request, &plan.temporary())
+}
+pub fn synthetic_epub_matches(afc: &mut impl AfcAccess, root: &str) -> Result<bool> {
+    if afc.stat(root)?.kind != FileKind::Directory {
+        return Ok(false);
+    }
+    for entry in aircard_core::books::synthetic_epub_entries() {
+        if afc.read(&format!("{root}/{}", entry.relative_path), MAX_FILE_BYTES)? != entry.data {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+/// Remove only a transaction-owned source; bounded traversal never follows links.
+fn remove_owned_source(afc: &mut impl AfcAccess, plan: &TestPlan) -> Result<()> {
+    let mut pending = vec![plan.source()];
+    let mut paths = Vec::new();
+    while let Some(path) = pending.pop() {
+        if paths.len() + pending.len() >= MAX_FILES {
+            return Err(Error::new(ErrorKind::InvalidInput, "source_cleanup_limit"));
+        }
+        match afc.stat(&path) {
+            Err(e) if e.kind == ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+            Ok(info) => match info.kind {
+                FileKind::Directory => {
+                    for leaf in afc.list(&path)? {
+                        if leaf == "." || leaf == ".." {
+                            continue;
+                        }
+                        aircard_core::safe_leaf(&leaf).map_err(|_| {
+                            Error::new(ErrorKind::InvalidInput, "source_cleanup_path")
+                        })?;
+                        pending.push(format!("{path}/{leaf}"));
+                    }
+                }
+                FileKind::File => {}
+                _ => return Err(Error::new(ErrorKind::InvalidInput, "source_cleanup_type")),
+            },
+        }
+        paths.push(path);
+    }
+    paths.sort_by_key(|p| std::cmp::Reverse(p.split('/').count()));
+    for path in paths {
+        afc.remove(&path)?;
+    }
+    Ok(())
 }
 pub fn original_content_unchanged(
     afc: &mut impl AfcAccess,
@@ -249,6 +395,7 @@ pub fn original_content_unchanged(
 fn owned_change(path: &str, plan: &TestPlan) -> bool {
     TRACKED_METADATA.contains(&path)
         || path == plan.destination()
+        || path.starts_with(&format!("{}/", plan.destination()))
         || path == plan.source()
         || path == plan.temporary()
         || ["Books", "Books/Sync", "Books/Sync/Database"].contains(&path)
@@ -321,7 +468,8 @@ pub fn restore(afc: &mut impl AfcAccess, snapshot: &BooksSnapshot, plan: &TestPl
             afc.remove(path)?;
         }
     }
-    for path in [plan.source(), plan.scratch_root.clone()]
+    remove_owned_source(afc, plan)?;
+    for path in [plan.scratch_root.clone()]
         .into_iter()
         .chain(plan.airlock_dirs_to_create.iter().rev().cloned())
     {
@@ -343,6 +491,8 @@ mod tests {
         entries: BTreeMap<String, SnapshotEntry>,
         fail_write: bool,
         writes: usize,
+        changing_path: Option<String>,
+        reads_to_change: u8,
     }
     impl AfcAccess for Mock {
         fn stat(&mut self, path: &str) -> Result<crate::FileInfo> {
@@ -369,6 +519,11 @@ mod tests {
                 .collect())
         }
         fn read(&mut self, path: &str, _: usize) -> Result<Vec<u8>> {
+            if self.changing_path.as_deref() == Some(path) && self.reads_to_change > 0 {
+                self.reads_to_change -= 1;
+                self.entries
+                    .insert(path.into(), SnapshotEntry::File(vec![self.reads_to_change]));
+            }
             match self.entries.get(path) {
                 Some(SnapshotEntry::File(data)) => Ok(data.clone()),
                 _ => Err(Error::new(ErrorKind::NotFound, "read")),
@@ -392,11 +547,24 @@ mod tests {
             }
         }
         fn rename(&mut self, source: &str, target: &str) -> Result<()> {
-            let entry = self.entries.remove(source).unwrap();
-            self.entries.insert(target.into(), entry);
+            let entries = self.entries.clone();
+            for (path, entry) in entries {
+                if path == source || path.starts_with(&format!("{source}/")) {
+                    self.entries.remove(&path);
+                    self.entries
+                        .insert(format!("{target}{}", &path[source.len()..]), entry);
+                }
+            }
             Ok(())
         }
         fn remove(&mut self, path: &str) -> Result<()> {
+            if self
+                .entries
+                .keys()
+                .any(|p| p.starts_with(&format!("{path}/")))
+            {
+                return Err(Error::new(ErrorKind::Conflict, "directory_not_empty"));
+            }
             self.entries
                 .remove(path)
                 .ok_or_else(|| Error::new(ErrorKind::NotFound, "remove"))?;
@@ -433,6 +601,21 @@ mod tests {
                 airlock_dirs_to_create: vec!["Airlock".into(), "Airlock/Book".into()],
             },
         )
+    }
+    #[test]
+    fn expanded_epub_transfer_and_partial_source_are_fully_recoverable() {
+        for transfer in [false, true] {
+            let (mut mock, snapshot, plan) = setup();
+            let mut touched = false;
+            stage_epub(&mut mock, &snapshot, &plan, &|| false, &mut touched).unwrap();
+            assert!(synthetic_epub_matches(&mut mock, &plan.source()).unwrap());
+            if transfer {
+                mock.rename(&plan.source(), &plan.destination()).unwrap();
+                assert!(synthetic_epub_matches(&mut mock, &plan.destination()).unwrap());
+            }
+            restore(&mut mock, &snapshot, &plan).unwrap();
+            assert_eq!(mock.entries, snapshot.entries);
+        }
     }
     #[test]
     fn stage_roundtrip_and_full_restore_preserve_user_book() {
@@ -533,5 +716,25 @@ mod tests {
         restore(&mut mock, &snapshot, &plan).unwrap();
         restore(&mut mock, &snapshot, &plan).unwrap();
         assert_eq!(mock.writes, 0);
+    }
+    #[test]
+    fn settling_metadata_is_bounded_but_changing_book_content_is_not_retried() {
+        for (leaf, settles) in [("Books.plist", true), ("reader.epub", false)] {
+            let path = format!("Books/{leaf}");
+            let mut mock = Mock {
+                entries: BTreeMap::from([
+                    ("Books".into(), SnapshotEntry::Directory),
+                    (path.clone(), SnapshotEntry::File(vec![0])),
+                ]),
+                changing_path: Some(path),
+                reads_to_change: 3,
+                ..Default::default()
+            };
+            let result = capture_stable(&mut mock, &|| false);
+            assert_eq!(result.is_ok(), settles);
+            if !settles {
+                assert_eq!(mock.reads_to_change, 1);
+            }
+        }
     }
 }

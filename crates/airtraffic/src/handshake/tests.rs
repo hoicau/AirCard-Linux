@@ -582,3 +582,106 @@ fn preserved_assets_must_not_be_requested_as_downloads() {
         );
     }
 }
+
+#[test]
+fn wallet_batch_rejects_missing_duplicate_unexpected_manifest_and_partial_precondition() {
+    let plan = aircard_core::customization::Plan {
+        transaction: LIBRARY.into(),
+        target: aircard_core::customization::Target::WalletArtwork(
+            "AAoUHigyPEZQWmRueIKMlqCqtL4=".into(),
+        ),
+        leaves: vec![
+            "cardBackgroundCombined@3x.png".into(),
+            "cardBackgroundCombined@2x.png".into(),
+            "cardBackgroundCombined.pdf".into(),
+        ],
+    };
+    let assets: Vec<_> = plan
+        .transfers(aircard_core::customization::Step::Install, &[0, 1, 2])
+        .unwrap()
+        .into_iter()
+        .map(|(asset_id, asset_path)| SyncAsset {
+            asset_id,
+            asset_path,
+            retained_ids: Default::default(),
+        })
+        .collect();
+    for mode in 0..5 {
+        let mut entries: Vec<_> = assets
+            .iter()
+            .map(|a| {
+                Value::Dictionary(Dictionary::from_iter([
+                    ("AssetID", Value::String(a.asset_id.clone())),
+                    ("IsDownload", Value::Boolean(true)),
+                ]))
+            })
+            .collect();
+        if mode == 1 {
+            entries.pop();
+        }
+        if mode == 2 {
+            entries.push(entries[0].clone());
+        }
+        if mode == 3 {
+            entries.push(Value::Dictionary(Dictionary::from_iter([
+                ("AssetID", Value::String("unrelated".into())),
+                ("IsDownload", Value::Boolean(true)),
+            ])));
+        }
+        let mut input = message("SyncAllowed", 0);
+        input.extend(message("ReadyForSync", 1));
+        input.extend(incoming(
+            "AssetManifest",
+            1,
+            Some(Dictionary::from_iter([(
+                "AssetManifest",
+                Value::Dictionary(Dictionary::from_iter([("Book", Value::Array(entries))])),
+            )])),
+        ));
+        input.extend(incoming("SyncFinished", 1, None));
+        let (mock, trace) = Mock::new(input);
+        let mut guards = 0;
+        let report = HandshakeClient { transport: mock }.synchronize_batch_checked(
+            SyncOptions {
+                library_id: LIBRARY,
+                grappa: None,
+                timeout: Duration::from_secs(3),
+                cancelled: &|| false,
+            },
+            &assets,
+            &mut || {
+                guards += 1;
+                mode != 4 || guards == 1
+            },
+            |_| {},
+        );
+        let sent = sent_messages(&trace.borrow().sent);
+        let completions: Vec<_> = sent
+            .iter()
+            .filter(|v| v.as_dictionary().unwrap()["Command"].as_string() == Some("FileComplete"))
+            .collect();
+        if mode == 0 {
+            assert_eq!(report.state, State::Finished);
+            assert_eq!(completions.len(), 3);
+            for (message, asset) in completions.iter().zip(&assets) {
+                assert_eq!(
+                    message.as_dictionary().unwrap()["Params"]
+                        .as_dictionary()
+                        .unwrap()["AssetID"]
+                        .as_string(),
+                    Some(asset.asset_id.as_str())
+                );
+            }
+        } else if mode == 4 {
+            assert_eq!(completions.len(), 1);
+            assert_eq!(
+                report.failure.unwrap().kind,
+                FailureKind::PreconditionChanged
+            );
+        } else {
+            assert!(completions.is_empty());
+            assert_eq!(report.failure.unwrap().kind, FailureKind::ManifestRejected);
+        }
+        assert!(trace.borrow().closed);
+    }
+}

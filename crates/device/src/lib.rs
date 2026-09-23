@@ -2,6 +2,7 @@
 pub mod books;
 use aircard_linux_adapter as native;
 pub mod self_test;
+pub mod staging;
 use serde::Serialize;
 use std::io;
 use thiserror::Error;
@@ -246,7 +247,13 @@ impl DeviceProvider for LinuxDeviceProvider {
         })
     }
     fn start_service(&self, device: &Device, service: &str) -> Result<LinuxService> {
-        if !["com.apple.atc", "com.apple.syslog_relay"].contains(&service) {
+        if ![
+            "com.apple.atc",
+            "com.apple.syslog_relay",
+            "com.apple.streaming_zip_conduit",
+        ]
+        .contains(&service)
+        {
             return Err(Error::new(ErrorKind::InvalidInput, "service_allowlist"));
         }
         self.session(device)?
@@ -257,7 +264,7 @@ impl DeviceProvider for LinuxDeviceProvider {
     fn afc(&self, device: &Device) -> Result<LinuxAfc> {
         self.session(device)?
             .afc()
-            .map(|inner| LinuxAfc(inner, false))
+            .map(|inner| LinuxAfc(inner, false, Vec::new()))
             .map_err(|e| Error::native(e, "start_afc"))
     }
 }
@@ -291,22 +298,43 @@ impl DuplexServiceTransport for LinuxService {
         })
     }
 }
-pub struct LinuxAfc(native::Afc, bool);
+pub struct LinuxAfc(native::Afc, bool, Vec<String>);
 impl LinuxAfc {
     /// Capability used only by an explicitly applied, snapshotted Books transaction.
     pub fn with_books_write_scope(mut self) -> Self {
         self.1 = true;
         self
     }
+    pub fn with_customization_scope(
+        mut self,
+        plan: &aircard_core::customization::Plan,
+    ) -> Result<Self> {
+        plan.validate()
+            .map_err(|_| Error::new(ErrorKind::InvalidInput, "customization_plan"))?;
+        self.1 = true;
+        self.2 = vec![plan.source(), plan.work()];
+        Ok(self)
+    }
     fn writable(&self, path: &str) -> Result<()> {
         self::path(path)?;
+        if self
+            .2
+            .iter()
+            .any(|root| path == root || path.starts_with(&format!("{root}/")))
+        {
+            return Ok(());
+        }
         if self.1
             && (path == "Books"
                 || path.starts_with("Books/")
                 || path == "Airlock"
                 || path == "Airlock/Book"
                 || path.strip_prefix("Airlock/Book/").is_some_and(|leaf| {
-                    leaf.starts_with("AirCard-Linux-Test-") && aircard_core::safe_leaf(leaf).is_ok()
+                    leaf.split('/').next().is_some_and(|root| {
+                        root.starts_with("AirCard-Linux-Test-")
+                            && root.ends_with(".epub")
+                            && aircard_core::safe_leaf(root).is_ok()
+                    })
                 }))
         {
             return Ok(());

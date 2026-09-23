@@ -114,6 +114,19 @@ impl PreparedCard {
         ]
     }
 }
+/// Non-personal, unmistakable card artwork used for owner-approved hardware acceptance.
+pub fn test_card() -> Result<PreparedCard> {
+    let image = image::RgbaImage::from_fn(768, 484, |x, y| {
+        let stripe = (x + y) / 48 % 2 == 0;
+        image::Rgba([
+            if stripe { 18 } else { 32 },
+            (90 + y * 100 / 484) as u8,
+            (170 + x * 70 / 768) as u8,
+            255,
+        ])
+    });
+    PreparedCard::from_image(DynamicImage::ImageRgba8(image))
+}
 fn rgb_to_pdf(width: u32, height: u32, rgb: &[u8]) -> Vec<u8> {
     let compressed = miniz_oxide::deflate::compress_to_vec_zlib(rgb, 6);
     let content = format!("q\n{width} 0 0 {height} 0 0 cm\n/Im0 Do\nQ\n");

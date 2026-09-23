@@ -7,3 +7,10 @@
 
 # Hardware session evidence stays local and is never published.
 /docs/evidence/
+
+# Native archives are local build outputs.
+/dist/
+
+# Caller-supplied sync material and conventional private card backups.
+/token.bin
+*.card-backup.json

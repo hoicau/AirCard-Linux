@@ -1,4 +1,4 @@
-name: Linux PoC
+name: Linux native
 on:
   push:
   pull_request:
@@ -13,10 +13,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - name: Native development libraries
+      - name: Native development and headless graphics libraries
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libimobiledevice-dev libplist-dev libusbmuxd-dev
+          sudo apt-get install -y build-essential pkg-config libimobiledevice-dev libplist-dev libusbmuxd-dev libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxkbcommon-dev libxkbcommon-x11-0 libwayland-dev libegl1-mesa-dev libgl1-mesa-dev libgl1-mesa-dri xvfb xauth python3 binutils
       - name: Rust stable
         run: |
           rustup toolchain install ${{ matrix.toolchain }} --profile minimal --component rustfmt --component clippy
@@ -25,3 +25,20 @@ jobs:
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo test --locked --workspace
       - run: cargo build --locked --workspace --release
+      - name: Native GUI smoke test (synthetic data only)
+        run: |
+          mkdir -p .local/gui-smoke
+          xvfb-run -a -s '-screen 0 1280x960x24 -nolisten tcp' env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET LIBGL_ALWAYS_SOFTWARE=1 timeout 40s target/release/aircard-gui --smoke-dir .local/gui-smoke
+          python3 scripts/check-gui-smoke.py .local/gui-smoke
+      - name: Native archive
+        run: ./scripts/package-native.sh '${{ matrix.os }}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aircard-linux-${{ matrix.os }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+      - name: Remove temporary UI fixtures
+        if: always()
+        run: rm -rf .local/gui-smoke
