@@ -1,6 +1,8 @@
 //! Wallet artwork UI with supervised native transactions (MIT).
 use crate::{
-    model::{Confirmation, Device, Discovery, redacted},
+    model::{
+        Confirmation, Device, Discovery, error_message, preferred_device, progress_text, redacted,
+    },
     worker::{self, Message},
 };
 use aircard_core::assets::{PreparedCard, Resource, resources_zip};
@@ -65,6 +67,9 @@ pub struct App {
     devices: Vec<Device>,
     selected: Option<usize>,
     route: String,
+    route_auto: bool,
+    device_check: Option<bool>,
+    cli_verified: bool,
     snapshot: String,
     token: String,
     token_attempted: bool,
@@ -72,6 +77,8 @@ pub struct App {
     job: Option<worker::Job>,
     job_name: String,
     job_error: Option<String>,
+    job_error_stage: Option<String>,
+    job_writes: bool,
     local: Option<LocalReceiver>,
     pending: Option<Confirmation>,
     restore_review: Option<Confirmation>,
@@ -148,6 +155,9 @@ impl App {
             devices: vec![],
             selected: None,
             route: "usb".into(),
+            route_auto: true,
+            device_check: None,
+            cli_verified: false,
             snapshot: String::new(),
             token: cli::sync_token::cached()
                 .map_or_else(String::new, |p| p.to_string_lossy().into_owned()),
@@ -156,6 +166,8 @@ impl App {
             job: None,
             job_name: String::new(),
             job_error: None,
+            job_error_stage: None,
+            job_writes: false,
             local: None,
             pending: None,
             restore_review: None,
@@ -202,7 +214,7 @@ impl App {
     fn chosen(&self) -> Option<Device> {
         self.selected
             .and_then(|i| self.devices.get(i))
-            .filter(|d| d.route == self.route)
+            .filter(|d| self.route_auto || d.route == self.route)
             .cloned()
     }
     fn log(&mut self, s: String) {
@@ -217,9 +229,11 @@ impl App {
         }
         self.failed = false;
         self.job_error = None;
+        self.job_error_stage = None;
         self.status = format!("{name} is running.");
         self.stage = name.into();
         self.job_name = name.into();
+        self.job_writes = args.iter().any(|a| a == "--apply");
         self.job = Some(worker::start(self.cli.clone(), args));
     }
     fn refresh(&mut self) {
@@ -229,6 +243,7 @@ impl App {
         self.cards.clear();
         self.card_hash.clear();
         self.discovery = Discovery::default();
+        self.device_check = None;
         self.devices.clear();
         self.selected = None;
         self.start(
@@ -265,6 +280,22 @@ impl App {
     fn setup_token(&mut self) {
         self.token_attempted = true;
         self.start("Set up sync token", vec!["setup-token".into()]);
+    }
+    fn auto_setup(&mut self) {
+        if self.tab == Tab::Device
+            && !self.busy()
+            && self.pending.is_none()
+            && self.smoke.is_none()
+            && !self.close_when_idle
+            && self.device_check != Some(false)
+            && self.chosen().is_some_and(|d| d.paired)
+        {
+            if !self.discovery.started {
+                self.detect_card();
+            } else if !self.card_hash.is_empty() && self.token.is_empty() && !self.token_attempted {
+                self.setup_token();
+            }
+        }
     }
     fn local_job(
         &mut self,
@@ -353,6 +384,9 @@ impl App {
         for message in messages {
             match message {
                 Message::Event(v) => {
+                    if v["event"] == "cli_ready" {
+                        self.cli_verified = true;
+                    }
                     if self.job_name == "Detect Wallet card" {
                         self.discovery.event(&v);
                         if self.discovery.listening {
@@ -368,14 +402,24 @@ impl App {
                     {
                         self.token = path.into();
                     }
-                    if v["event"] == "error" {
-                        self.job_error = v["hint"].as_str().map(str::to_string);
+                    if (v["event"] == "error" || v["failure"].is_object())
+                        && let Some(message) = error_message(&v)
+                        && self.job_error.is_none()
+                    {
+                        self.job_error = Some(message);
+                        self.job_error_stage = Some(self.stage.clone());
                     }
                     if let Some(d) = Device::from_event(&v) {
                         self.devices.push(d);
-                        if self.selected.is_none() {
-                            self.selected = self.devices.iter().position(|d| d.route == self.route);
-                        }
+                    }
+                    if v["event"] == "devices_complete" {
+                        self.selected = preferred_device(
+                            &self.devices,
+                            (!self.route_auto).then_some(self.route.as_str()),
+                        );
+                    }
+                    if v["event"] == "probe_complete" {
+                        self.device_check = Some(true);
                     }
                     if v["event"] == "card_match"
                         && let Some(hash) = v["hash"].as_str()
@@ -386,12 +430,19 @@ impl App {
                     {
                         self.cards.push(hash.into());
                     }
-                    if let Some(stage) = v["stage"].as_str().or(v["state"].as_str()) {
+                    if let Some(stage) = progress_text(&v) {
                         self.stage = stage.into();
+                        if !self.discovery.listening {
+                            self.status = format!("{stage}…");
+                        }
                     }
                     self.log(redacted(&v).to_string());
                 }
                 Message::Finished(result) => {
+                    let cancelled = self
+                        .job
+                        .as_ref()
+                        .is_some_and(|job| job.cancel.load(Ordering::Relaxed));
                     self.job = None;
                     match result {
                         Ok(()) => {
@@ -413,6 +464,15 @@ impl App {
                                 .into();
                             } else if self.job_name == "Set up sync token" {
                                 self.status = "Sync token ready and selected. It will be reused next time. Close Wallet and Books before applying.".into();
+                            } else if self.job_name == "Check device" {
+                                self.status = "Trust and file access verified. Sync authentication and artwork compatibility are checked during the operation.".into();
+                            } else if self.job_name == "Discover devices" && self.chosen().is_none()
+                            {
+                                self.status = if self.devices.is_empty() {
+                                    "No iPhone found. Connect by USB, unlock it and refresh devices. Help includes connection diagnostics."
+                                } else {
+                                    "Choose your iPhone and connection. If trust is missing, pair it with this computer first."
+                                }.into();
                             }
                             if let Some(c) = self.restore_review.take() {
                                 self.pending = Some(c);
@@ -421,15 +481,25 @@ impl App {
                         Err(e) => {
                             self.failed = true;
                             self.status = self.job_error.take().unwrap_or(e);
+                            if let Some(stage) = self.job_error_stage.take() {
+                                self.status = format!("Stopped during {stage}. {}", self.status);
+                            }
+                            if self.job_name == "Check device" {
+                                self.device_check = Some(false);
+                            }
+                            if self.job_writes && PathBuf::from(self.journal.trim()).is_dir() {
+                                self.status.push_str(" Keep this recovery directory. Reconnect the original iPhone, close Wallet and Books, then use Recover before another Apply.");
+                            }
                             if self.job_name == "Detect Wallet card" {
-                                if self.discovery.finished && self.discovery.lines == 0 {
+                                if cancelled {
+                                    self.discovery.cancelled = true;
+                                    self.status = self.discovery.result(self.cards.len());
+                                } else if self.discovery.finished && self.discovery.lines == 0 {
                                     self.status = self.discovery.result(0);
-                                } else {
-                                    self.status = "Card detection could not finish. Unlock and reconnect your iPhone, check trust/pairing, then refresh devices. See Details for the connection error.".into();
                                 }
                                 self.discovery.finished = true;
                                 self.discovery.listening = false;
-                                self.discovery.failure = Some(self.status.clone());
+                                self.discovery.failure = (!cancelled).then(|| self.status.clone());
                                 self.stage = "Detection stopped".into();
                             }
                             self.restore_review = None;
@@ -600,13 +670,36 @@ impl App {
             "Select one paired iPhone and one Wallet card.",
         );
         let previous = self.chosen();
+        let previous_auto = self.route_auto;
         ui.horizontal_wrapped(|ui| {
-            ui.selectable_value(&mut self.route, "usb".into(), "USB");
-            ui.selectable_value(&mut self.route, "wifi".into(), "Wi-Fi");
+            if ui.selectable_label(self.route_auto, "Automatic").clicked() {
+                self.route_auto = true;
+            }
+            for (route, label) in [("usb", "USB"), ("wifi", "Wi-Fi")] {
+                if ui
+                    .selectable_label(!self.route_auto && self.route == route, label)
+                    .clicked()
+                {
+                    self.route_auto = false;
+                    self.route = route.into();
+                }
+            }
             if ui.button("Refresh devices").clicked() {
                 self.refresh();
             }
+            if ui
+                .add_enabled(self.chosen().is_some(), egui::Button::new("Check device"))
+                .clicked()
+            {
+                self.device_job("Check device", vec!["probe".into()]);
+            }
         });
+        if previous_auto != self.route_auto || self.chosen().is_none() {
+            self.selected = preferred_device(
+                &self.devices,
+                (!self.route_auto).then_some(self.route.as_str()),
+            );
+        }
         egui::ComboBox::from_id_salt("device-select")
             .width(ui.available_width().min(440.0))
             .selected_text(
@@ -618,7 +711,7 @@ impl App {
                     .devices
                     .iter()
                     .enumerate()
-                    .filter(|(_, d)| d.route == self.route)
+                    .filter(|(_, d)| self.route_auto || d.route == self.route)
                 {
                     ui.selectable_value(&mut self.selected, Some(i), d.label());
                 }
@@ -627,6 +720,7 @@ impl App {
             self.cards.clear();
             self.card_hash.clear();
             self.discovery = Discovery::default();
+            self.device_check = None;
         }
         let paired = self.chosen().is_some_and(|d| d.paired);
         if let Some(d) = self.chosen() {
@@ -636,6 +730,10 @@ impl App {
                 d.route.to_uppercase(),
                 if d.paired { "Paired" } else { &d.status }
             ));
+        }
+        if let Some(ok) = self.device_check {
+            ui.label(if ok { "Trust and file access checked. Sync compatibility is verified during the operation." }
+                else { "Device check failed. Follow the status guidance below before applying." });
         }
         ui.label("Card detection starts automatically. When prompted, open Wallet on your iPhone and tap the intended card.");
         if self.discovery.finished {
@@ -698,7 +796,10 @@ impl App {
             egui::TextEdit::singleline(&mut self.journal)
                 .hint_text("Unused directory for Apply / Restore; existing directory for Recover"),
         );
-        let ready = paired && !self.token.trim().is_empty() && !self.journal.trim().is_empty();
+        let ready = paired
+            && self.device_check != Some(false)
+            && !self.token.trim().is_empty()
+            && !self.journal.trim().is_empty();
         let common = vec![
             "--journal".into(),
             self.journal.trim().into(),
@@ -731,6 +832,19 @@ impl App {
             "AirCard Linux",
             concat!("Wallet card artwork / version ", env!("CARGO_PKG_VERSION")),
         );
+        ui.label(if self.cli_verified {
+            "Matching CLI version verified."
+        } else {
+            "CLI version is checked before every device or setup task."
+        });
+        ui.collapsing("Connection diagnostics", |ui| {
+            ui.label("Use Check device in Apply & restore to verify trust and file access without changing the phone.");
+            ui.label("If USB is missing, install usbmuxd and libimobiledevice with your distribution's package manager, then inspect the service:");
+            ui.monospace("systemctl status usbmuxd --no-pager");
+            ui.label("If Browse does not open, install your desktop's xdg-desktop-portal backend. You can also enter paths directly.");
+            ui.monospace("systemctl --user status xdg-desktop-portal --no-pager");
+            ui.hyperlink_to("Distribution install commands", "https://github.com/hoicau/AirCard-Linux/blob/main/docs/INSTALL.md");
+        });
         for (heading, body) in [
             (
                 "Prepare",
@@ -931,19 +1045,7 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll(ctx);
-        if self.tab == Tab::Device
-            && !self.busy()
-            && self.pending.is_none()
-            && self.smoke.is_none()
-            && !self.close_when_idle
-            && self.chosen().is_some_and(|d| d.paired)
-        {
-            if !self.discovery.started {
-                self.detect_card();
-            } else if !self.card_hash.is_empty() && self.token.is_empty() && !self.token_attempted {
-                self.setup_token();
-            }
-        }
+        self.auto_setup();
         self.smoke_before(ctx);
         if ctx.input(|i| i.viewport().close_requested()) && self.busy() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
@@ -1068,6 +1170,7 @@ impl eframe::App for App {
         if self.tab == Tab::Device
             && !self.busy()
             && !self.discovery.started
+            && self.device_check != Some(false)
             && self.chosen().is_some_and(|d| d.paired)
             && self.smoke.is_none()
         {
@@ -1125,6 +1228,60 @@ mod tests {
     use std::sync::{Arc, atomic::AtomicBool};
 
     #[test]
+    fn automatic_setup_runs_discovery_then_token_through_verified_worker() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("aircard-gui-flow-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        struct Clean(PathBuf);
+        impl Drop for Clean {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _clean = Clean(dir.clone());
+        let binary = dir.join("aircard");
+        let script = r##"#!/bin/sh
+case "$1" in
+--version) echo 'aircard @VERSION@' ;;
+devices)
+ echo '{"event":"device","udid":"fixture-phone","transport":"wifi","info":{"pairing":"paired_session_verified","ios_version":"fixture"}}'
+ echo '{"event":"device","udid":"fixture-phone","transport":"usb","info":{"pairing":"paired_session_verified","ios_version":"fixture"}}'
+ echo '{"event":"devices_complete","count":2}' ;;
+scan)
+ echo '{"event":"service_started","service":"com.apple.syslog_relay"}'
+ echo '{"event":"card_match","hash":"AAoUHigyPEZQWmRueIKMlqCqtL4="}'
+ echo '{"event":"syslog_complete","lines":1,"cancelled":false}' ;;
+setup-token) echo '{"event":"token_ready","path":"fixture-token.bin"}' ;;
+*) exit 9 ;;
+esac
+"##.replace("@VERSION@", env!("CARGO_PKG_VERSION"));
+        std::fs::write(&binary, script).unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut app = App::empty(binary, false);
+        app.token.clear();
+        app.tab = Tab::Device;
+        app.refresh();
+        let ctx = egui::Context::default();
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(5) {
+            app.poll(&ctx);
+            app.auto_setup();
+            if !app.busy() && app.token_attempted {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!app.busy(), "automatic setup deadline");
+        assert!(!app.failed, "{}", app.status);
+        assert_eq!(app.chosen().unwrap().route, "usb");
+        assert!(app.cli_verified);
+        assert_eq!(app.card_hash, "AAoUHigyPEZQWmRueIKMlqCqtL4=");
+        assert_eq!(app.token, "fixture-token.bin");
+        app.auto_setup();
+        assert!(!app.busy(), "completed setup must not loop");
+    }
+
+    #[test]
     fn discovery_fills_only_a_single_successful_candidate() {
         let hashes = [
             "AAoUHigyPEZQWmRueIKMlqCqtL4=",
@@ -1174,7 +1331,7 @@ mod tests {
         tx.send(Message::Finished(Err("exit 1".into()))).unwrap();
         app.poll(&egui::Context::default());
         assert_eq!(app.token, "existing-token.bin");
-        assert_eq!(app.status, "Check connection and retry setup.");
+        assert!(app.status.ends_with("Check connection and retry setup."));
         assert!(app.failed);
     }
 }

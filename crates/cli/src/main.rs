@@ -121,7 +121,7 @@ enum Command {
     },
     /// Check existing pairing, iOS version and AFC access without writing.
     Probe,
-    /// Apply upstream Wallet hash filters. Hashes are suppressed unless explicitly requested.
+    /// Detect Wallet identifiers in live logs. Hashes are suppressed unless explicitly requested.
     Scan {
         #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=3600))]
         duration: u64,
@@ -167,7 +167,8 @@ fn watchdog(args: &Args, cancel: &AtomicBool) -> u8 {
     };
     let seconds = match &args.command {
         Command::SetupToken { .. } => 35,
-        Command::Scan { duration, .. } => *duration + args.timeout + 5,
+        Command::Scan { duration, .. } => *duration + args.timeout * 4 + 10,
+        Command::Probe => args.timeout * 4 + 10,
         Command::CardTest { hold_seconds, .. } => args.timeout * 30 + hold_seconds + 90,
         Command::CardApply { .. } | Command::CardRestore { .. } | Command::CardRecover { .. } => {
             args.timeout * 30 + 90
@@ -272,7 +273,12 @@ fn run(args: &Args, cancel: &AtomicBool) -> device::Result<u8> {
         args.transport.map(Into::into),
     )?;
     emit(&json!({"event":"stage","stage":"existing_pair_session","transport":selected.transport}));
-    let info = provider.pairing(&selected)?;
+    let read_only = matches!(args.command, Command::Scan { .. } | Command::Probe);
+    let info = if read_only {
+        read_connection_retry(|| provider.pairing(&selected), cancel)?
+    } else {
+        provider.pairing(&selected)?
+    };
     emit(&json!({"event":"paired","info":info}));
     match &args.command {
         Command::Devices { .. } | Command::PrepareCard { .. } | Command::SetupToken { .. } => {
@@ -286,7 +292,7 @@ fn run(args: &Args, cancel: &AtomicBool) -> device::Result<u8> {
         }
         Command::Probe => {
             emit(&json!({"event":"stage","stage":"start_afc"}));
-            let mut afc = provider.afc(&selected)?;
+            let mut afc = read_connection_retry(|| provider.afc(&selected), cancel)?;
             let snapshot = aircard_core::DiagnosticSnapshot {
                 schema_version: 1,
                 kind: "diagnostic_only_not_a_backup".into(),
@@ -313,6 +319,32 @@ fn run(args: &Args, cancel: &AtomicBool) -> device::Result<u8> {
     }
     Ok(0)
 }
+/// Only used to open read-only sessions. Transaction setup and writes never use this retry.
+fn read_connection_retry<T>(
+    mut connect: impl FnMut() -> device::Result<T>,
+    cancel: &AtomicBool,
+) -> device::Result<T> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err(device::Error::new(
+            device::ErrorKind::Cancelled,
+            "read_connection",
+        ));
+    }
+    match connect() {
+        Err(e)
+            if matches!(
+                e.kind,
+                device::ErrorKind::Timeout | device::ErrorKind::Disconnected
+            ) && !cancel.load(Ordering::Relaxed) =>
+        {
+            emit(
+                &json!({"event":"stage","stage":"retry_read_connection","attempt":2,"max_attempts":2,"error":e}),
+            );
+            connect()
+        }
+        result => result,
+    }
+}
 fn capture(
     provider: &impl DeviceProvider,
     selected: &device::Device,
@@ -322,7 +354,7 @@ fn capture(
     cancel: &AtomicBool,
 ) -> device::Result<()> {
     emit(&json!({"event":"stage","stage":"start_syslog"}));
-    let mut service = provider.syslog(selected)?;
+    let mut service = read_connection_retry(|| provider.syslog(selected), cancel)?;
     emit(
         &json!({"event":"service_started","service":"com.apple.syslog_relay","tls":service.tls()}),
     );
@@ -418,4 +450,58 @@ fn main() -> ExitCode {
     };
     let _ = io::stdout().flush();
     ExitCode::from(code)
+}
+
+#[cfg(test)]
+mod connection_tests {
+    use super::*;
+    #[test]
+    fn read_connection_retries_only_transient_failures_once() {
+        for kind in [
+            device::ErrorKind::Timeout,
+            device::ErrorKind::Disconnected,
+            device::ErrorKind::Locked,
+            device::ErrorKind::NotPaired,
+            device::ErrorKind::Tls,
+        ] {
+            let mut calls = 0;
+            let result: device::Result<()> = read_connection_retry(
+                || {
+                    calls += 1;
+                    Err(device::Error::new(kind, "fixture"))
+                },
+                &AtomicBool::new(false),
+            );
+            assert!(result.is_err());
+            assert_eq!(
+                calls,
+                if matches!(
+                    kind,
+                    device::ErrorKind::Timeout | device::ErrorKind::Disconnected
+                ) {
+                    2
+                } else {
+                    1
+                }
+            );
+        }
+        let mut calls = 0;
+        let value = read_connection_retry(
+            || {
+                calls += 1;
+                if calls == 1 {
+                    Err(device::Error::new(device::ErrorKind::Timeout, "fixture"))
+                } else {
+                    Ok(42)
+                }
+            },
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(value, 42);
+        assert_eq!(calls, 2);
+        let result: device::Result<()> =
+            read_connection_retry(|| panic!("cancelled"), &AtomicBool::new(true));
+        assert_eq!(result.unwrap_err().kind, device::ErrorKind::Cancelled);
+    }
 }

@@ -141,6 +141,9 @@ install -Dm755 target/release/aircard-gui "$HOME/.local/bin/aircard-gui"
 
 Keep both executables together: the GUI starts the adjacent CLI worker. If they must
 live in different directories, pass `aircard-gui --cli /absolute/path/to/aircard`.
+Before starting a task, the GUI checks `aircard --version` with a three-second deadline
+and requires an exact version match. Replace both files from the same release if that
+check fails; consult native library dependencies if the CLI cannot run at all.
 Do not launch the GUI as root. It does not install a daemon or persist device identifiers.
 
 ## Native archives
@@ -169,6 +172,13 @@ with the guide above. Build availability is not hardware compatibility proof.
 Run AirCard as your regular user. Do not start a second usbmuxd manually to work around
 permissions. Distribution usbmuxd packages normally install the required udev rules and
 may start the daemon on device attachment rather than enabling a persistent service.
+
+The GUI's **Check device** button checks pairing and AFC file access without writes.
+**Automatic** chooses USB first only when one paired physical iPhone is available;
+multiple phones still need a choice. Explicit USB/Wi-Fi selections are preserved.
+Pairing and read-only service startup retry one timeout/disconnection on the same route.
+These checks do not establish ATC authentication or artwork compatibility; those are
+validated by the operation itself. No artwork write is automatically retried.
 
 ```sh
 systemctl status usbmuxd --no-pager

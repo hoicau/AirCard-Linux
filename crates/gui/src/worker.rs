@@ -30,10 +30,62 @@ pub fn start(binary: PathBuf, args: Vec<String>) -> Job {
     let cancel = Arc::new(AtomicBool::new(false));
     let flag = cancel.clone();
     thread::spawn(move || {
-        let result = run(&binary, &args, &flag, &tx);
+        let result = verify_cli(&binary, &flag).and_then(|()| {
+            event(&tx, serde_json::json!({"event":"cli_ready"}));
+            run(&binary, &args, &flag, &tx)
+        });
         let _ = tx.send(Message::Finished(result));
     });
     Job { receiver, cancel }
+}
+fn verify_cli(binary: &Path, cancel: &AtomicBool) -> Result<(), String> {
+    let mut child = Command::new(binary)
+        .arg("--version")
+        .env_remove("AIRCARD_INTERNAL_WORKER")
+        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
+        .process_group(0).spawn()
+        .map_err(|_| "Cannot start the matching aircard CLI. Keep aircard and aircard-gui from the same release together and install the native libraries listed in docs/INSTALL.md.".to_string())?;
+    let stdout = child.stdout.take().expect("piped stdout");
+    let reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout.take(257).read_to_end(&mut bytes).map(|_| bytes)
+    });
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Err(_) => break None,
+            _ => {}
+        }
+        if cancel.load(Ordering::Relaxed) || start.elapsed() >= Duration::from_secs(3) {
+            break None;
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    let _ = nix::sys::signal::killpg(
+        nix::unistd::Pid::from_raw(child.id() as i32),
+        nix::sys::signal::Signal::SIGKILL,
+    );
+    let _ = child.wait();
+    let bytes = reader.join().ok().and_then(Result::ok).unwrap_or_default();
+    if cancel.load(Ordering::Relaxed) {
+        return Err("CLI check cancelled.".into());
+    }
+    if status.is_none() {
+        return Err("CLI version check did not finish within 3 seconds. Reinstall both binaries from the same release.".into());
+    }
+    if !status.is_some_and(|s| s.success()) {
+        return Err("CLI cannot run. Reinstall both binaries from the same release and check native library dependencies in docs/INSTALL.md.".into());
+    }
+    if bytes.len() > 256
+        || String::from_utf8_lossy(&bytes).trim() != concat!("aircard ", env!("CARGO_PKG_VERSION"))
+    {
+        return Err(format!(
+            "CLI version mismatch. This GUI requires aircard {}. Replace both binaries with files from the same release.",
+            env!("CARGO_PKG_VERSION")
+        ));
+    }
+    Ok(())
 }
 fn run(
     binary: &Path,
@@ -127,7 +179,7 @@ fn run(
                 nix::sys::signal::Signal::SIGKILL,
             );
             let _ = child.wait();
-            break Err("Worker stopped after the cleanup deadline. Keep any recovery journal and use Restore before retrying.".into());
+            break Err("Worker stopped after the cleanup deadline. Keep the recovery directory and use Recover before retrying.".into());
         }
         thread::sleep(Duration::from_millis(30));
     };
@@ -156,6 +208,12 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn mismatched_cli_is_rejected_before_running_commands() {
+        // /bin/echo accepts --version, but is not the matching AirCard CLI.
+        let error = verify_cli(Path::new("/bin/echo"), &AtomicBool::new(false)).unwrap_err();
+        assert!(error.contains("version mismatch"));
+    }
     #[test]
     fn missing_worker_is_actionable_and_does_not_panic() {
         let job = start(PathBuf::from("/nonexistent/aircard-test"), vec![]);

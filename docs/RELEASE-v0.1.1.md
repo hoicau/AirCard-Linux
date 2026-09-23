@@ -16,6 +16,14 @@ and sync token setup.
 - **Clearer troubleshooting:** The interface shows when Wallet detection is ready and
   provides retry guidance for missing identifiers, missing logs and connection failures.
   Token download failures include recovery steps.
+- **Simpler connection setup:** Automatic selection prefers USB for a single paired
+  iPhone; multiple phones require an explicit choice. Manual USB/Wi-Fi selections stay
+  explicit. **Check device** verifies trust and file access, and Help includes service
+  diagnostics. The GUI rejects missing or mismatched CLI binaries before starting a task.
+- **Readable progress and recovery guidance:** Artwork backup, writing, cache refresh,
+  verification and cleanup have named stages. Connection and protocol errors show
+  actionable explanations. Read-only connection startup can retry one transient failure
+  on the same route; artwork writes never retry automatically.
 - **More complete identifier detection:** Fixes matching of padded and unpadded SHA-1
   and SHA-256 identifiers, accepts valid URL-safe Base64 hashes, and collects multiple
   identifiers from the same log line.
@@ -40,3 +48,5 @@ and sync token setup.
 Workspace tests, formatting, Clippy and release build; native GUI smoke captures covering
 light/dark themes, compact windows, waiting for Wallet and no-card guidance; live pinned
 token download, private-file permissions and offline cache reuse.
+Additional tests cover route selection, CLI version mismatch, bounded connection retries
+and protocol-specific error presentation.

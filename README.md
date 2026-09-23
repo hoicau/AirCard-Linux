@@ -32,7 +32,9 @@ and checksums; use a build compatible with your distribution's glibc and native 
 
 1. Connect and unlock your own already paired iPhone. Keep Books closed.
 2. In **Card artwork**, open PNG/JPEG/WebP and prepare the centered 1536 × 969 preview.
-3. In **Apply & restore**, select the device and transport. Card detection starts automatically.
+3. In **Apply & restore**, **Automatic** selects a paired iPhone when only one is available,
+   preferring its USB connection. If multiple iPhones are connected, choose yours explicitly.
+   USB and Wi-Fi can still be selected manually. Card detection starts automatically.
    Wait for **Waiting for Wallet**, then open Wallet on your iPhone and tap the intended card.
    A single detected identifier is filled in automatically; multiple results require a choice.
    Check the target and close Wallet. Detection stops after a match or 60 seconds.
@@ -49,6 +51,13 @@ for the prompt and reopen the intended card. If no logs arrive, unlock/reconnect
 and refresh devices. Some cards or iOS versions may hide identifiers. Linux cannot open
 Wallet or select a card for you. A detected identifier can also come from background Wallet
 activity, so verify the target before applying; retry with only the intended card open if unsure.
+
+**Check device** verifies trust and file access without writing to the phone. The GUI checks
+that the adjacent CLI version matches before starting a task. **Help → Connection diagnostics**
+provides service checks and installation guidance. A transient timeout or disconnect while
+opening a read-only trust, log or file-access session gets one retry on the same device and
+route. An explicit Wi-Fi selection never switches to USB. Artwork writes are never retried
+automatically; failures retain actionable stage and recovery guidance.
 
 AirCard replaces existing background resources only: `cardBackgroundCombined@3x.png`,
 `cardBackgroundCombined@2x.png` and `cardBackgroundCombined.pdf`. It invalidates the

@@ -341,6 +341,7 @@ fn restore_part(
     session.restore(afc, j, file)
 }
 fn restore_all(session: &Session<'_>, dir: &Path, journals: &mut [Journal]) -> Result<()> {
+    emit(&json!({"event":"stage","stage":"restore_originals"}));
     let mut first_error = None;
     // Restore artwork first; cache restoration then reflects the restored artwork.
     for (i, j) in journals.iter_mut().enumerate() {
@@ -374,6 +375,7 @@ fn stage(
     j: &Journal,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<()> {
+    emit(&json!({"event":"stage","stage":"prepare_transfer"}));
     let archive = j
         .plan
         .archive(&j.payloads)
@@ -412,6 +414,9 @@ fn install(
     let indices: Vec<_> = (0..j.plan.leaves.len()).collect();
     j.export_started = true;
     file.save(j)?;
+    emit(
+        &json!({"event":"stage","stage":if matches!(j.plan.target, Target::WalletCache { .. }) { "refresh_caches" } else { "read_original_artwork" }}),
+    );
     session.sync(afc, j, Step::ExportOriginals, &indices, cancelled)?;
     for i in indices {
         if let Some(bytes) = read_slot(afc, &j.plan.slot("original", i))? {
@@ -433,12 +438,14 @@ fn install(
     let active: Vec<_> = j.originals.keys().copied().collect();
     j.apply_started = true;
     file.save(j)?;
+    emit(&json!({"event":"stage","stage":"write_artwork"}));
     session.sync(afc, j, Step::Install, &active, cancelled)?;
     for &i in &active {
         if read_slot(afc, &format!("{}/payload_{i}", j.plan.source()))?.is_some() {
             return Err(invalid("card_install_move_failed"));
         }
     }
+    emit(&json!({"event":"stage","stage":"verify_artwork"}));
     session.sync(afc, j, Step::ExportInstalled, &active, cancelled)?;
     for &i in &active {
         if read_slot(afc, &j.plan.slot("verified", i))?.as_ref() != Some(&j.payloads[i]) {
@@ -495,6 +502,7 @@ pub fn run(
         timeout,
     };
     if matches!(command, Command::CardRecover { .. }) {
+        emit(&json!({"event":"stage","stage":"restore_originals"}));
         let (m, mut journals) = read_journal(journal)?;
         if m.device != fingerprint {
             return Err(invalid("card_device_mismatch"));
@@ -613,6 +621,7 @@ pub fn run(
             afc.staging_preflight(&StagingPlan {
                 transaction: plan.transaction.clone(),
             })?;
+            emit(&json!({"event":"stage","stage":"preserve_books"}));
             let books = device::books::capture_stable(&mut afc, &cancelled)?;
             let payloads = if let Some(b) = &restore_backup {
                 b.parts[part].applied.clone()
@@ -647,6 +656,7 @@ pub fn run(
             let mut file = FileJournal { path: &path, bytes };
             stage(&session, &mut afc, j, &cancelled)?;
             if let Some(backup) = &restore_backup {
+                emit(&json!({"event":"stage","stage":"restore_originals"}));
                 j.originals = backup.parts[part].originals.clone();
                 j.export_started = true;
                 j.apply_started = true;
@@ -655,9 +665,11 @@ pub fn run(
             } else {
                 install(&session, &mut afc, j, &mut file, &cancelled)?;
             }
+            emit(&json!({"event":"stage","stage":"restore_books"}));
             device::books::restore(&mut afc, &j.books, &j.books_plan())?;
         }
         if let Some(path) = backup_path {
+            emit(&json!({"event":"stage","stage":"save_backup"}));
             let backup = Backup::from_journals(&fingerprint, &journals)?;
             local::write_new(
                 path,
@@ -686,6 +698,7 @@ pub fn run(
         return Ok(if cancelled() { 130 } else { 0 });
     }
     set_phase(journal, Phase::Committed)?;
+    emit(&json!({"event":"stage","stage":"cleanup"}));
     for j in &journals {
         let mut afc = provider.afc(selected)?.with_customization_scope(&j.plan)?;
         finish(&mut afc, j)?;

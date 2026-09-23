@@ -108,6 +108,108 @@ impl Device {
         ]
     }
 }
+
+/// Auto selection is limited to one physical device; USB wins only among its routes.
+pub fn preferred_device(devices: &[Device], route: Option<&str>) -> Option<usize> {
+    let candidates: Vec<_> = devices
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| d.paired && route.is_none_or(|r| d.route == r))
+        .collect();
+    let id = &candidates.first()?.1.udid;
+    if candidates.iter().any(|(_, d)| &d.udid != id) {
+        return None;
+    }
+    candidates
+        .iter()
+        .find(|(_, d)| d.route == "usb")
+        .or_else(|| candidates.first())
+        .map(|(i, _)| *i)
+}
+
+pub fn progress_text(event: &Value) -> Option<&'static str> {
+    match event["stage"]
+        .as_str()
+        .filter(|_| event["event"] == "stage")
+    {
+        Some("enumerate") => Some("Finding your iPhone"),
+        Some("existing_pair_session") => Some("Checking iPhone trust"),
+        Some("start_syslog") => Some("Connecting to Wallet activity"),
+        Some("retry_read_connection") => Some("Reconnecting once"),
+        Some("start_afc") => Some("Checking file access"),
+        Some("prepare_transfer") => Some("Preparing artwork transfer"),
+        Some("read_original_artwork") => Some("Backing up original artwork"),
+        Some("write_artwork") => Some("Writing card artwork"),
+        Some("verify_artwork") => Some("Verifying card artwork"),
+        Some("refresh_caches") => Some("Refreshing Wallet caches"),
+        Some("restore_originals") => Some("Restoring original files"),
+        Some("preserve_books") => Some("Preserving Books data"),
+        Some("restore_books") => Some("Restoring Books data"),
+        Some("save_backup") => Some("Saving private backup"),
+        Some("cleanup") => Some("Finishing cleanup"),
+        _ => match event["event"].as_str() {
+            Some("probe_complete") => Some("Device checks passed"),
+            Some("card_recovery_complete") => Some("Recovery complete"),
+            _ => None,
+        },
+    }
+}
+
+/// Use bounded protocol fields for user guidance; raw identifiers stay out of status copy.
+pub fn error_message(event: &Value) -> Option<String> {
+    if let Some(kind) = event["failure"]["kind"].as_str() {
+        return Some(match kind {
+            "unsupported_grappa" => "This iPhone requested an unsupported sync authentication method. Keep the recovery directory; the downloaded token does not establish device compatibility.",
+            "device_rejected" => "The iPhone rejected the sync request. Check the sync token and iOS compatibility; keep any recovery directory.",
+            "device_protected" => "The iPhone is locked or its data is protected. Unlock it and keep any recovery directory.",
+            "precondition_changed" => "Books data changed during the operation. Close Books and keep the recovery directory.",
+            "timeout" => "The iPhone did not complete the sync stage in time. Keep the recovery directory and reconnect the original iPhone.",
+            "disconnected" => "The iPhone disconnected during sync. Reconnect the original iPhone and keep the recovery directory.",
+            "cancelled" => "Sync cancelled. Wait for restoration and cleanup to finish.",
+            _ => "The iPhone could not complete the sync stage. Keep the recovery directory and inspect Details for the protocol failure.",
+        }.into());
+    }
+    let error = &event["error"];
+    let kind = error["kind"].as_str().or(event["kind"].as_str());
+    let message = match kind {
+        Some("locked") => "Unlock your iPhone and retry the device check.",
+        Some("not_paired" | "trust_pending" | "trust_denied") => {
+            "Connect by USB, unlock your iPhone and confirm Trust through your system's pairing tool. Then refresh devices."
+        }
+        Some("usbmux_unavailable") => {
+            "Cannot reach usbmuxd. Install your distribution's usbmuxd/libimobiledevice packages and check the service. See Help for commands."
+        }
+        Some("no_device") => {
+            "No iPhone is available on the selected connection. Reconnect and unlock it, then refresh devices."
+        }
+        Some("tls") => {
+            "The trusted connection failed. Check this computer's existing pairing and reconnect the iPhone."
+        }
+        Some("service_denied") => {
+            "The iPhone refused this service. Unlock it, close other sync apps and check iOS compatibility."
+        }
+        Some("disconnected") => {
+            "The iPhone connection was lost. Reconnect the same iPhone and retry the device check."
+        }
+        Some("timeout") => {
+            "The connection timed out. Unlock the iPhone and check the cable or Wi-Fi connection."
+        }
+        Some("invalid_input")
+            if error["operation"]
+                .as_str()
+                .is_some_and(|s| s.starts_with("grappa_token") || s.starts_with("local_input")) =>
+        {
+            "A local input file could not be read. Check its path, size and permissions. Sync tokens must be 84 bytes with permissions 0600."
+        }
+        _ => {
+            return event["hint"]
+                .as_str()
+                .or(error["hint"].as_str())
+                .map(str::to_string);
+        }
+    };
+    Some(message.into())
+}
 #[derive(Clone)]
 pub struct Confirmation {
     pub title: String,
@@ -144,6 +246,44 @@ pub fn redacted(value: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn device(id: &str, route: &str, paired: bool) -> Device {
+        Device {
+            udid: id.into(),
+            route: route.into(),
+            paired,
+            ios: "fixture".into(),
+            status: "fixture".into(),
+        }
+    }
+    #[test]
+    fn automatic_route_never_guesses_between_phones_or_changes_explicit_wifi() {
+        let routes = vec![device("a", "wifi", true), device("a", "usb", true)];
+        assert_eq!(preferred_device(&routes, None), Some(1));
+        assert_eq!(preferred_device(&routes, Some("wifi")), Some(0));
+        assert_eq!(preferred_device(&routes[..1], None), Some(0));
+        assert_eq!(preferred_device(&routes[..1], Some("usb")), None);
+        let mut ambiguous = routes;
+        ambiguous.push(device("b", "usb", true));
+        assert_eq!(preferred_device(&ambiguous, None), None);
+        assert_eq!(preferred_device(&[device("a", "usb", false)], None), None);
+    }
+    #[test]
+    fn status_messages_keep_protocol_rejection_specific_and_private() {
+        let event = serde_json::json!({"event":"atc_sync","failure":{"kind":"unsupported_grappa","stage":"HostInfo","device_session":12345}});
+        let message = error_message(&event).unwrap();
+        assert!(message.contains("unsupported sync authentication"));
+        assert!(!message.contains("12345"));
+        let event = serde_json::json!({"event":"error","error":{"kind":"locked","hint":"private raw error","operation":"existing_pair_session"}});
+        assert!(error_message(&event).unwrap().contains("Unlock"));
+        assert_eq!(
+            progress_text(&serde_json::json!({"event":"stage","stage":"write_artwork"})),
+            Some("Writing card artwork")
+        );
+        assert_eq!(
+            progress_text(&serde_json::json!({"event":"atc_message","stage":"ReadyForSync"})),
+            None
+        );
+    }
     #[test]
     fn discovery_distinguishes_ready_empty_no_logs_and_cancelled() {
         let mut scan = Discovery::default();
