@@ -165,7 +165,7 @@ local build; bundling device libraries does not change the minimum glibc version
 
 ```sh
 ./scripts/package-native.sh
-# Produces dist/aircard-linux-0.1.2-<architecture>.tar.gz and .sha256
+# Produces dist/aircard-linux-0.2.0-<architecture>.tar.gz and .sha256
 ```
 
 Pass an optional label, such as `debian-13`, to distinguish local builds.
@@ -197,7 +197,7 @@ commit, verifies checksums and `BUILD-METADATA.json` (commit, version and clean 
 uploads the archive and SHA256 file. It does not compile or call `linux.yml` again.
 
 Commit the version and lockfile updates, push the branch, wait for its CI to pass, then
-publish the matching tag, such as `v0.1.2`. If the artifact is missing, pending or expired,
+publish the matching tag, such as `v0.2.0`. If the artifact is missing, pending or expired,
 the release upload fails with guidance. Wait or rerun the original branch CI, then rerun
 the release workflow. Rerunning a release uses its original commit; it does not pick up
 later branch changes. Successful uploads replace assets with the same names.

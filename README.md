@@ -159,7 +159,7 @@ cargo build --locked --workspace --release
 Branch pushes and pull requests run Linux CI. Tag pushes do not rebuild. Publishing a
 GitHub Release (including a prerelease) reuses the successful branch CI artifact for that
 exact commit. It checks the archive checksum, embedded source commit, clean-tree status
-and version before uploading. The tag must match the CLI/GUI version, for example `v0.1.2`.
+and version before uploading. The tag must match the CLI/GUI version, for example `v0.2.0`.
 Wait for branch CI to pass before publishing; if the artifact expired, rerun that branch
 build. Rerun the release upload after its artifact becomes available. Release uploads never
 start another Linux build.
