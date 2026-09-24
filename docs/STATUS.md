@@ -21,7 +21,7 @@ One authorized, paired iPhone on iOS 27.0, connected over USB to Manjaro x86_64.
   verified after restore; staging and journal removed.
 - Abrupt interruption: process group killed after installed-artwork readback; a new
   card-recover process restored original bytes and completed cleanup from its durable journal.
-- GUI: twelve native synthetic views captured and inspected, including light/dark,
+- GUI: sixteen native synthetic views captured and inspected, including light/dark,
   expanded automatic save paths, Restore/Recover guidance and compact windows. Device
   operations run the validated CLI.
 - Wi-Fi: not accepted on hardware; owner deferred it. No USB fallback is performed.
@@ -29,6 +29,26 @@ One authorized, paired iPhone on iOS 27.0, connected over USB to Manjaro x86_64.
 The Wallet-only release meets the local USB acceptance scope. Wi-Fi, additional cards/OS
 versions and hosted CI outcomes are outside this verified boundary.
 Hardware reports and private fixtures stay in ignored local directories and are not shipped.
+
+## Built-in token verification (2026-09-24)
+
+The connected USB iPhone on iOS 27.0 passed pairing, AFC access and two authenticated
+ATC handshakes using built-in token entry 0. The token was created with no external
+programs available in `PATH`. Cached reuse preserved the token file's inode and timestamp.
+Both TLS sessions advertised Grappa `(version=1, deviceType=0, protocolVersion=1)` and
+returned `ReadyForSync`, in 274 ms and 238 ms respectively, with no protocol failure.
+The test sent no manifest, metadata or asset payload; it did not apply or restore artwork.
+
+The initial diagnostic AFC root listing contained 20 entries; inspection after the first
+handshake contained 21. The first root-comparison check failed, and the initial names
+were not retained, so the newly appearing entry was not identified. The repeat check
+confirmed identical 21-entry root listings before and after its handshake. No AirCard
+staging roots were present; system directories were left untouched. Temporary token files,
+test executables and downloaded reference sources were removed after verification.
+
+The 32 CLI/GUI tests, workspace clippy with warnings denied, formatting, diff checks and
+release build passed. Offline tests cover the default token bytes, private file/directory
+permissions, cached reuse, custom files and preservation of invalid existing files.
 
 ## Automated verification
 

@@ -20,7 +20,7 @@ use std::{
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Artwork,
-    Device,
+    Advanced,
     Help,
 }
 #[derive(Clone, Copy)]
@@ -45,19 +45,23 @@ struct Smoke {
     requested: bool,
     started: Instant,
 }
-const SMOKE_NAMES: [&str; 12] = [
+const SMOKE_NAMES: [&str; 16] = [
     "artwork-light",
     "artwork-dark",
     "help-light",
-    "device-light",
+    "advanced-light",
     "confirmation-dark",
     "compact-light",
     "listening-light",
     "no-card-dark",
-    "device-compact-light",
+    "advanced-compact-light",
     "save-locations-dark",
     "restore-light",
     "save-locations-compact",
+    "preview-compact",
+    "empty-light",
+    "empty-dark",
+    "setup-compact",
 ];
 pub struct App {
     cli: PathBuf,
@@ -230,12 +234,23 @@ impl App {
         };
         visuals.selection.bg_fill = Color32::from_rgb(18, 116, 109);
         visuals.selection.stroke.color = Color32::WHITE;
+        for widget in [
+            &mut visuals.widgets.inactive,
+            &mut visuals.widgets.hovered,
+            &mut visuals.widgets.active,
+            &mut visuals.widgets.open,
+            &mut visuals.widgets.noninteractive,
+        ] {
+            widget.corner_radius = egui::CornerRadius::same(8);
+        }
         ctx.set_visuals(visuals);
         ctx.style_mut(|s| {
             s.spacing.item_spacing = Vec2::new(10.0, 10.0);
             s.spacing.button_padding = Vec2::new(14.0, 8.0);
             s.text_styles
                 .insert(egui::TextStyle::Body, egui::FontId::proportional(15.0));
+            s.text_styles
+                .insert(egui::TextStyle::Small, egui::FontId::proportional(13.0));
             s.text_styles
                 .insert(egui::TextStyle::Heading, egui::FontId::proportional(27.0));
         });
@@ -373,7 +388,7 @@ impl App {
         self.start("Set up sync token", vec!["setup-token".into()]);
     }
     fn auto_setup(&mut self) {
-        if self.tab == Tab::Device
+        if self.tab == Tab::Artwork
             && !self.busy()
             && self.pending.is_none()
             && self.smoke.is_none()
@@ -407,7 +422,10 @@ impl App {
     }
     fn picker(&mut self, field: Field, save: bool) {
         self.local_job("Choose file", move || {
-            let dialog = rfd::FileDialog::new();
+            let mut dialog = rfd::FileDialog::new();
+            if matches!(field, Field::CardInput) {
+                dialog = dialog.add_filter("Artwork", &["png", "jpg", "jpeg", "webp"]);
+            }
             let path = if matches!(field, Field::Recovery) {
                 dialog.pick_folder()
             } else if save {
@@ -416,6 +434,22 @@ impl App {
                 dialog.pick_file()
             };
             Ok(LocalResult::Picked(field, path))
+        });
+    }
+    fn prepare_artwork(&mut self) {
+        let input = PathBuf::from(self.card_input.trim());
+        if self.card_output.is_empty() {
+            self.card_output = input
+                .with_file_name("wallet-resources.zip")
+                .display()
+                .to_string();
+        }
+        self.local_job("Prepare artwork", move || {
+            let bytes = cli::local::read(&input, aircard_core::assets::MAX_IMAGE_BYTES, false)
+                .map_err(|e| e.to_string())?;
+            PreparedCard::from_bytes(&bytes)
+                .map(LocalResult::Card)
+                .map_err(|e| e.to_string())
         });
     }
     fn field(&mut self, field: Field) -> &mut String {
@@ -432,17 +466,21 @@ impl App {
         ui.label(RichText::new(label).strong());
         ui.horizontal(|ui| {
             let width = (ui.available_width() - 95.0).max(120.0);
-            if ui
-                .add_sized(
-                    [width, 32.0],
-                    egui::TextEdit::singleline(self.field(field)).hint_text("Path"),
-                )
-                .changed()
-            {
+            let response = ui.add_sized(
+                [width, 32.0],
+                egui::TextEdit::singleline(self.field(field)).hint_text("Path"),
+            );
+            if response.changed() {
                 self.invalidate(field);
             }
             if ui.button("Browse").clicked() {
                 self.picker(field, save);
+            } else if matches!(field, Field::CardInput)
+                && response.lost_focus()
+                && !self.card_input.trim().is_empty()
+                && self.card.is_none()
+            {
+                self.prepare_artwork();
             }
         });
     }
@@ -638,7 +676,8 @@ impl App {
             match result {
                 Ok(LocalResult::Card(card)) => {
                     self.install_card(ctx, card);
-                    self.status = "Artwork prepared. Preview and export are ready.".into();
+                    self.status =
+                        "Artwork ready. Check the preview, card and device before applying.".into();
                     self.stage = "Prepared".into();
                 }
                 Ok(LocalResult::Saved) => {
@@ -650,6 +689,9 @@ impl App {
                     self.invalidate(field);
                     self.stage = "Ready".into();
                     self.status = "File selected.".into();
+                    if matches!(field, Field::CardInput) {
+                        self.prepare_artwork();
+                    }
                 }
                 Ok(LocalResult::Picked(_, None)) => {
                     self.stage = "Ready".into();
@@ -676,62 +718,66 @@ impl App {
         }
     }
     fn artwork(&mut self, ui: &mut egui::Ui) {
-        title(
-            ui,
-            "Card artwork",
-            "Prepare the artwork you will apply to your Wallet card.",
-        );
-        self.path_row(ui, "Source image", Field::CardInput, false);
-        if ui
-            .add_enabled(
-                !self.card_input.trim().is_empty(),
-                egui::Button::new("Prepare artwork"),
-            )
-            .clicked()
-        {
-            let input = PathBuf::from(self.card_input.trim());
-            if self.card_output.is_empty() {
-                self.card_output = input
-                    .with_file_name("wallet-resources.zip")
-                    .display()
-                    .to_string();
-            }
-            self.local_job("Prepare artwork", move || {
-                let bytes = cli::local::read(&input, aircard_core::assets::MAX_IMAGE_BYTES, false)
-                    .map_err(|e| e.to_string())?;
-                PreparedCard::from_bytes(&bytes)
-                    .map(LocalResult::Card)
-                    .map_err(|e| e.to_string())
-            });
-        }
-        ui.add_space(12.0);
-        if ui.available_width() > 680.0 {
-            ui.columns(2, |columns| {
-                self.card_preview(&mut columns[0]);
-                self.card_exports(&mut columns[1]);
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+        if ui.available_width() >= 760.0 {
+            surface_row(ui, |left, right| {
+                self.card_configuration(left);
+                self.card_preview(right);
             });
         } else {
-            self.card_preview(ui);
-            ui.add_space(12.0);
-            self.card_exports(ui);
+            surface(ui, |ui| self.card_configuration(ui));
+            ui.add_space(10.0);
+            surface(ui, |ui| self.card_preview(ui));
         }
     }
+    fn card_configuration(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("Card Configuration").size(21.0));
+        ui.label(RichText::new("Choose a Wallet card and its replacement artwork.").weak());
+        ui.add_space(12.0);
+        self.card_selector(ui);
+        ui.add_space(12.0);
+        self.path_row(ui, "Select artwork", Field::CardInput, false);
+        ui.label(
+            RichText::new("PNG, JPEG or WebP / preview updates automatically")
+                .small()
+                .weak(),
+        );
+        ui.add_space(12.0);
+        self.device_selector(ui);
+        self.sync_saved_paths();
+        ui.add_space(16.0);
+        self.apply_artwork(ui);
+    }
     fn card_preview(&self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("Artwork Preview").size(21.0));
+        ui.label(RichText::new("1536 × 969 px / centered crop").weak());
+        ui.add_space(12.0);
+        let width = ui.available_width();
+        let size = Vec2::new(width, width * 969.0 / 1536.0);
         if let Some(texture) = &self.card_texture {
-            let width = ui.available_width().min(420.0);
             ui.add(
                 egui::Image::new(texture)
-                    .fit_to_exact_size(Vec2::new(width, width * 969.0 / 1536.0))
+                    .fit_to_exact_size(size)
                     .corner_radius(16),
             );
-            ui.label(
-                RichText::new("1536 × 969 / centered crop / PNG + PDF")
-                    .small()
-                    .weak(),
-            );
         } else {
-            empty_preview(ui, "Your artwork", "PNG, JPEG or WebP / up to 32 MiB");
+            let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+            ui.painter()
+                .rect_filled(rect, 16, ui.visuals().faint_bg_color);
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "No artwork loaded",
+                egui::FontId::proportional(18.0),
+                ui.visuals().weak_text_color(),
+            );
         }
+        ui.add_space(12.0);
+        ui.label(
+            RichText::new("After applying, close Apple Wallet and reopen it.")
+                .small()
+                .weak(),
+        );
     }
     fn card_exports(&mut self, ui: &mut egui::Ui) {
         ui.add_space(12.0);
@@ -766,7 +812,11 @@ impl App {
             }
         });
         ui.add_space(8.0);
-        ui.label(RichText::new("Exports @3x.png, @2x.png and PDF artwork. Select Apply & restore to use this artwork on your iPhone.").small().weak());
+        ui.label(
+            RichText::new("Exports @3x.png, @2x.png and PDF artwork from the selected image.")
+                .small()
+                .weak(),
+        );
     }
     fn export(&mut self, resources: Vec<Resource>, output: PathBuf) {
         self.local_job("Export resources", move || {
@@ -775,13 +825,105 @@ impl App {
             Ok(LocalResult::Saved)
         });
     }
-    fn device(&mut self, ui: &mut egui::Ui) {
-        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
-        title(
-            ui,
-            "Apply & restore",
-            "Select one paired iPhone and one Wallet card.",
+    fn device_selector(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("Select device").strong());
+        let previous = self.chosen();
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("device-select")
+                .width((ui.available_width() - 100.0).max(120.0))
+                .wrap_mode(egui::TextWrapMode::Truncate)
+                .selected_text(
+                    self.chosen()
+                        .map_or_else(|| "Choose a device".into(), |d| d.label()),
+                )
+                .show_ui(ui, |ui| {
+                    for (i, d) in self
+                        .devices
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, d)| self.route_auto || d.route == self.route)
+                    {
+                        ui.selectable_value(&mut self.selected, Some(i), d.label());
+                    }
+                });
+            if ui.button("Refresh").clicked() {
+                self.refresh();
+            }
+        });
+        self.device_selection_changed(previous);
+        if let Some(d) = self.chosen() {
+            ui.label(
+                RichText::new(format!(
+                    "iOS {} / {}",
+                    d.ios,
+                    if d.paired { "Paired" } else { &d.status }
+                ))
+                .small()
+                .weak(),
+            );
+        } else {
+            ui.label(
+                RichText::new("Connect and unlock your iPhone, then refresh.")
+                    .small()
+                    .weak(),
+            );
+        }
+    }
+    fn device_selection_changed(&mut self, previous: Option<Device>) {
+        if previous != self.chosen() {
+            self.cards.clear();
+            self.card_hash.clear();
+            self.discovery = Discovery::default();
+            self.device_check = None;
+        }
+    }
+    fn card_selector(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("Select cards").strong());
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("card-select")
+                .width((ui.available_width() - 100.0).max(120.0))
+                .wrap_mode(egui::TextWrapMode::Truncate)
+                .selected_text(if self.card_hash.is_empty() {
+                    if self.cards.is_empty() {
+                        "Waiting for a card"
+                    } else {
+                        "Choose detected card"
+                    }
+                } else {
+                    &self.card_hash
+                })
+                .show_ui(ui, |ui| {
+                    for hash in &self.cards {
+                        ui.selectable_value(&mut self.card_hash, hash.clone(), hash);
+                    }
+                });
+            if ui
+                .add_enabled(
+                    self.chosen().is_some_and(|d| d.paired),
+                    egui::Button::new("Scan"),
+                )
+                .on_hover_text("Detect card again")
+                .clicked()
+            {
+                self.detect_card();
+            }
+        });
+        ui.label(
+            RichText::new(if self.discovery.listening {
+                "Open Wallet and tap the intended card now."
+            } else if !self.card_hash.is_empty() {
+                "Check the selected card, then close Wallet before applying."
+            } else if self.discovery.finished {
+                "No card selected. Scan again and open the intended card in Wallet."
+            } else {
+                "When prompted, open Wallet and tap the intended card."
+            })
+            .small()
+            .weak(),
         );
+    }
+    fn connection_options(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("Connection").strong());
         let previous = self.chosen();
         let previous_auto = self.route_auto;
         ui.horizontal_wrapped(|ui| {
@@ -797,9 +939,6 @@ impl App {
                     self.route = route.into();
                 }
             }
-            if ui.button("Refresh devices").clicked() {
-                self.refresh();
-            }
             if ui
                 .add_enabled(self.chosen().is_some(), egui::Button::new("Check device"))
                 .clicked()
@@ -813,78 +952,95 @@ impl App {
                 (!self.route_auto).then_some(self.route.as_str()),
             );
         }
-        egui::ComboBox::from_id_salt("device-select")
-            .width(ui.available_width().min(440.0))
-            .selected_text(
-                self.chosen()
-                    .map_or_else(|| "Choose a device".into(), |d| d.label()),
-            )
-            .show_ui(ui, |ui| {
-                for (i, d) in self
-                    .devices
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, d)| self.route_auto || d.route == self.route)
-                {
-                    ui.selectable_value(&mut self.selected, Some(i), d.label());
-                }
-            });
-        if previous != self.chosen() {
-            self.cards.clear();
-            self.card_hash.clear();
-            self.discovery = Discovery::default();
-            self.device_check = None;
-        }
-        let paired = self.chosen().is_some_and(|d| d.paired);
-        if let Some(d) = self.chosen() {
-            ui.label(format!(
-                "iOS {} / {} / {}",
-                d.ios,
-                d.route.to_uppercase(),
-                if d.paired { "Paired" } else { &d.status }
-            ));
-        }
+        self.device_selection_changed(previous);
+        self.device_selector(ui);
+        self.card_selector(ui);
         if let Some(ok) = self.device_check {
             ui.label(if ok { "Trust and file access checked. Sync compatibility is verified during the operation." }
                 else { "Device check failed. Follow the status guidance below before applying." });
         }
-        ui.label("Card detection starts automatically. When prompted, open Wallet on your iPhone and tap the intended card.");
-        if self.discovery.finished {
-            ui.label(self.discovery.result(self.cards.len()));
-        }
-        if !paired {
-            ui.label("Connect and unlock your iPhone, establish trust with this computer, then refresh devices. USB is recommended for setup.");
-        }
-        if self.discovery.started
-            && ui
-                .add_enabled(paired, egui::Button::new("Detect card again"))
-                .clicked()
+    }
+    fn operation_connected(&self) -> bool {
+        self.chosen().is_some_and(|d| d.paired)
+            && self.device_check != Some(false)
+            && !self.token.trim().is_empty()
+    }
+    fn recovery_pending(&self) -> bool {
+        !self.recovery.is_empty() && PathBuf::from(&self.recovery).is_dir()
+    }
+    fn operation_args(&self) -> Vec<String> {
+        vec![
+            "--journal".into(),
+            self.journal.trim().into(),
+            "--grappa-token".into(),
+            self.token.trim().into(),
+            "--timeout".into(),
+            "25".into(),
+        ]
+    }
+    fn apply_artwork(&mut self, ui: &mut egui::Ui) {
+        let recovery_pending = self.recovery_pending();
+        let ready =
+            self.operation_connected() && !self.journal.trim().is_empty() && !recovery_pending;
+        if ui
+            .add_enabled(
+                ready
+                    && self.card.is_some()
+                    && !self.card_hash.is_empty()
+                    && !self.backup_output.trim().is_empty(),
+                egui::Button::new(RichText::new("Apply Artwork…").color(Color32::WHITE))
+                    .fill(ui.visuals().selection.bg_fill)
+                    .min_size(Vec2::new(ui.available_width(), 40.0)),
+            )
+            .clicked()
         {
-            self.detect_card();
+            let mut args = vec![
+                "card-apply".into(),
+                self.card_input.trim().into(),
+                "--card-hash".into(),
+                self.card_hash.clone(),
+                "--backup".into(),
+                self.backup_output.trim().into(),
+            ];
+            args.extend([
+                "--expected-artwork-sha256".into(),
+                aircard_core::sha256(&self.card.as_ref().unwrap().png),
+            ]);
+            args.extend(self.operation_args());
+            self.review("Apply card artwork", "Replace this card's background and save its original artwork in the backup below. Keep Wallet and Books closed during the operation. Reopen Wallet when complete.", args);
         }
-        egui::ComboBox::from_id_salt("card-select")
-            .selected_text(if self.card_hash.is_empty() {
-                if self.cards.is_empty() {
-                    "Waiting for a card identifier"
-                } else {
-                    "Choose detected card"
-                }
-            } else {
-                &self.card_hash
-            })
-            .show_ui(ui, |ui| {
-                for hash in &self.cards {
-                    ui.selectable_value(&mut self.card_hash, hash.clone(), hash);
-                }
+        if recovery_pending {
+            ui.label("An unfinished operation was found. Open Advanced Options and recover on the original iPhone before applying another change.");
+        }
+    }
+    fn advanced(&mut self, ui: &mut egui::Ui) {
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+        title(
+            ui,
+            "Advanced Options",
+            "Manage backups, recovery and sync token setup.",
+        );
+        self.sync_saved_paths();
+        if ui.available_width() >= 760.0 {
+            surface_row(ui, |left, right| {
+                self.backup_options(left);
+                self.advanced_setup(right);
             });
+        } else {
+            surface(ui, |ui| self.backup_options(ui));
+            ui.add_space(10.0);
+            surface(ui, |ui| self.advanced_setup(ui));
+        }
+    }
+    fn advanced_setup(&mut self, ui: &mut egui::Ui) {
         ui.label(RichText::new("Sync token").strong());
         ui.label(if self.token.is_empty() {
-            "Fetched automatically from a pinned public GitHub source after a card is selected, then saved privately on this computer."
+            "The built-in token is saved privately on this computer after a card is selected. Setup works offline."
         } else {
             "Token selected. Saved setup tokens are reused on future launches."
         });
         ui.horizontal_wrapped(|ui| {
-            if ui.button("Get sync token automatically").clicked() {
+            if ui.button("Set up sync token").clicked() {
                 self.setup_token();
             }
             ui.hyperlink_to(
@@ -895,7 +1051,13 @@ impl App {
         ui.collapsing("Use an existing token / show path", |ui| {
             self.path_row(ui, "Private 84-byte token file", Field::Token, false);
         });
+        ui.add_space(16.0);
+        self.connection_options(ui);
         self.sync_saved_paths();
+        ui.add_space(16.0);
+        ui.collapsing("Export artwork", |ui| self.card_exports(ui));
+    }
+    fn backup_options(&mut self, ui: &mut egui::Ui) {
         ui.label(RichText::new("Backup & recovery").strong());
         ui.label("Your original card artwork is saved automatically so you can restore it later. Recovery files protect you if an operation is interrupted.");
         egui::CollapsingHeader::new("Advanced save locations")
@@ -912,48 +1074,13 @@ impl App {
             });
             ui.label("These paths must be unused. AirCard creates the backup file and recovery folder when you confirm the operation.");
         });
-        let connected = paired && self.device_check != Some(false) && !self.token.trim().is_empty();
-        let recovery_pending = !self.recovery.is_empty() && PathBuf::from(&self.recovery).is_dir();
+        let connected = self.operation_connected();
+        let recovery_pending = self.recovery_pending();
         let ready = connected && !self.journal.trim().is_empty() && !recovery_pending;
-        let common = vec![
-            "--journal".into(),
-            self.journal.trim().into(),
-            "--grappa-token".into(),
-            self.token.trim().into(),
-            "--timeout".into(),
-            "25".into(),
-        ];
-        if ui
-            .add_enabled(
-                ready
-                    && self.card.is_some()
-                    && !self.card_hash.is_empty()
-                    && !self.backup_output.trim().is_empty(),
-                egui::Button::new("Review apply…"),
-            )
-            .clicked()
-        {
-            let mut args = vec![
-                "card-apply".into(),
-                self.card_input.trim().into(),
-                "--card-hash".into(),
-                self.card_hash.clone(),
-                "--backup".into(),
-                self.backup_output.trim().into(),
-            ];
-            args.extend([
-                "--expected-artwork-sha256".into(),
-                aircard_core::sha256(&self.card.as_ref().unwrap().png),
-            ]);
-            args.extend(common.clone());
-            self.review("Apply card artwork", "Replace this card's background and save its original artwork in the backup below. Keep Wallet and Books closed during the operation. Reopen Wallet when complete.", args);
-        }
-        if recovery_pending {
-            ui.label("An unfinished operation was found. Use Recover below on the original iPhone before applying another change.");
-        }
+        let common = self.operation_args();
         egui::CollapsingHeader::new("Restore or recover")
-            .default_open(recovery_pending)
-            .open(if recovery_pending { Some(true) } else { self.smoke.as_ref().map(|s| s.phase == 10) })
+            .default_open(true)
+            .open(if recovery_pending { Some(true) } else { self.smoke.as_ref().map(|s| s.phase != 9 && s.phase != 11) })
             .show(ui, |ui| {
                 ui.label("Restore returns a card to its saved artwork. Select a card to find its latest backup, or Browse for an older or imported backup.");
                 self.path_row(ui, "Existing backup to restore", Field::Snapshot, false);
@@ -993,7 +1120,7 @@ impl App {
             "CLI version is checked before every device or setup task."
         });
         ui.collapsing("Connection diagnostics", |ui| {
-            ui.label("Use Check device in Apply & restore to verify trust and file access without changing the phone.");
+            ui.label("Use Check device in Advanced Options to verify trust and file access without changing the phone.");
             ui.label("If USB is missing, install usbmuxd and libimobiledevice with your distribution's package manager, then inspect the service:");
             ui.monospace("systemctl status usbmuxd --no-pager");
             ui.label("If Browse does not open, install your desktop's xdg-desktop-portal backend. You can also enter paths directly.");
@@ -1003,7 +1130,7 @@ impl App {
         for (heading, body) in [
             (
                 "Prepare",
-                "Open an image, inspect the centered 1536 × 969 crop, then select Apply & restore.",
+                "In Apply Artwork, open an image and inspect the centered 1536 × 969 crop.",
             ),
             (
                 "Apply",
@@ -1011,7 +1138,7 @@ impl App {
             ),
             (
                 "Sync token",
-                "After a card is selected, AirCard downloads the compatibility token from a pinned public GitHub source, checks its integrity and stores it privately for reuse. You can also choose an existing 84-byte token. No Apple Account login is needed. Compatibility still depends on iOS.",
+                "After a card is selected, AirCard saves its built-in compatibility token privately for reuse. Setup works offline. You can also choose an existing 84-byte token. No Apple Account login is needed. Compatibility still depends on iOS.",
             ),
             (
                 "Recover",
@@ -1027,7 +1154,7 @@ impl App {
             ),
             (
                 "Privacy",
-                "Backups stay on this computer. Copy details redacts device and card identifiers. No Apple libraries, pairing records or token table are distributed.",
+                "Backups stay on this computer. Copy details redacts device and card identifiers. No Apple libraries or pairing records are distributed.",
             ),
         ] {
             ui.add_space(12.0);
@@ -1125,15 +1252,15 @@ impl App {
         if smoke.frames == 0 {
             smoke.started = Instant::now();
             let phase = smoke.phase;
-            self.dark = matches!(phase, 1 | 4 | 7 | 9);
+            self.dark = matches!(phase, 1 | 4 | 7 | 9 | 14);
             self.tab = match phase {
                 2 => Tab::Help,
-                3 | 4 | 6..=11 => Tab::Device,
+                3 | 8..=11 | 15 => Tab::Advanced,
                 _ => Tab::Artwork,
             };
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(
-                if matches!(phase, 5 | 8 | 11) {
-                    Vec2::new(700.0, 540.0)
+                if matches!(phase, 5 | 8 | 11 | 12 | 15) {
+                    Vec2::new(680.0, 520.0)
                 } else {
                     Vec2::new(1080.0, 780.0)
                 },
@@ -1157,10 +1284,22 @@ impl App {
             }
             if phase >= 9 {
                 self.discovery = Discovery::default();
-                self.card_hash = "fixture-card-identifier".into();
+                self.card_hash = if self.devices.is_empty() {
+                    String::new()
+                } else {
+                    "fixture-card-identifier".into()
+                };
                 self.token = "private-token.bin".into();
                 self.stage = "Ready".into();
                 self.status = "UI verification with synthetic data. Device access disabled.".into();
+            }
+            if matches!(phase, 13 | 14) {
+                self.card = None;
+                self.card_texture = None;
+                self.card_input.clear();
+                self.devices.clear();
+                self.selected = None;
+                self.card_hash.clear();
             }
             if phase == 4 {
                 self.review("Apply card artwork", "Replace the selected card background and save its original artwork in a private backup. This is a UI fixture; no device operation will run.", vec!["card-apply".into(), "synthetic.png".into(), "--backup".into(), "card-backup.json".into(), "--journal".into(), "recovery".into(), "--card-hash".into(), "fixture-card-identifier".into()]);
@@ -1246,8 +1385,35 @@ impl eframe::App for App {
                     .fill(ctx.style().visuals.panel_fill),
             )
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("AirCard").size(23.0).strong());
+                ui.horizontal_wrapped(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("AirCard").size(23.0).strong());
+                        ui.label(
+                            RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
+                                .size(14.0)
+                                .weak(),
+                        );
+                    });
+                    ui.add_space(12.0);
+                    ui.add_enabled_ui(self.pending.is_none(), |ui| {
+                        ui.horizontal(|ui| {
+                            for (tab, label) in [
+                                (Tab::Artwork, "Apply Artwork"),
+                                (Tab::Advanced, "Advanced Options"),
+                                (Tab::Help, "Help"),
+                            ] {
+                                if ui
+                                    .add(
+                                        egui::Button::selectable(self.tab == tab, label)
+                                            .corner_radius(16),
+                                    )
+                                    .clicked()
+                                {
+                                    self.tab = tab;
+                                }
+                            }
+                        });
+                    });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.selectable_label(self.dark, "Dark").clicked() {
                             self.dark = true;
@@ -1290,68 +1456,41 @@ impl eframe::App for App {
                     ctx.style().visuals.text_color()
                 }));
             });
-        egui::SidePanel::left("navigation")
-            .exact_width(158.0)
-            .resizable(false)
-            .frame(
-                egui::Frame::new()
-                    .inner_margin(16)
-                    .fill(ctx.style().visuals.panel_fill),
-            )
-            .show(ctx, |ui| {
-                for (tab, label) in [
-                    (Tab::Artwork, "Card artwork"),
-                    (Tab::Device, "Apply & restore"),
-                    (Tab::Help, "Help"),
-                ] {
-                    ui.add_enabled_ui(self.pending.is_none(), |ui| {
-                        ui.selectable_value(&mut self.tab, tab, label);
-                    });
-                }
-                ui.add_space(28.0);
-                ui.label(RichText::new("CONNECTION").small().weak());
-                if let Some(d) = self.chosen() {
-                    ui.label(d.route.to_uppercase());
-                    ui.label(format!("iOS {}", d.ios));
-                    ui.label(if d.paired {
-                        "Paired"
-                    } else {
-                        "Pairing required"
-                    });
-                } else {
-                    ui.label("No selection");
-                }
-                if self.smoke.is_some() {
-                    ui.add_space(24.0);
-                    ui.label(RichText::new("Synthetic UI test").small().weak());
-                }
-            });
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
                     .inner_margin(24)
-                    .fill(ctx.style().visuals.window_fill),
+                    .fill(if self.tab == Tab::Help {
+                        ctx.style().visuals.window_fill
+                    } else {
+                        ctx.style().visuals.panel_fill
+                    }),
             )
             .show(ctx, |ui| {
                 let mut scroll = egui::ScrollArea::vertical()
+                    .id_salt(("page", self.tab as u8))
                     .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                     .auto_shrink([false, false]);
                 if let Some(smoke) = &self.smoke {
-                    scroll =
-                        scroll.vertical_scroll_offset(if smoke.phase >= 9 { 500.0 } else { 0.0 });
+                    scroll = scroll.vertical_scroll_offset(match smoke.phase {
+                        11 => 180.0,
+                        12 => 500.0,
+                        15 => 600.0,
+                        _ => 0.0,
+                    });
                 }
                 scroll.show(ui, |ui| {
                     ui.add_enabled_ui(!self.busy() && self.pending.is_none(), |ui| {
                         match self.tab {
                             Tab::Artwork => self.artwork(ui),
-                            Tab::Device => self.device(ui),
+                            Tab::Advanced => self.advanced(ui),
                             Tab::Help => self.help(ui),
                         }
                     });
                 });
             });
         // Repaint once after navigation or a device change so automatic setup can start.
-        if self.tab == Tab::Device
+        if self.tab == Tab::Artwork
             && !self.busy()
             && !self.discovery.started
             && self.device_check != Some(false)
@@ -1393,23 +1532,88 @@ fn title(ui: &mut egui::Ui, heading: &str, subtitle: &str) {
     ui.label(RichText::new(subtitle).weak());
     ui.add_space(16.0);
 }
-fn empty_preview(ui: &mut egui::Ui, heading: &str, description: &str) {
+fn surface_frame(ui: &egui::Ui) -> egui::Frame {
     egui::Frame::new()
-        .fill(ui.visuals().faint_bg_color)
-        .corner_radius(16)
-        .inner_margin(28)
-        .show(ui, |ui| {
-            ui.set_min_size(Vec2::new(ui.available_width().min(500.0), 170.0));
-            ui.add_space(30.0);
-            ui.label(RichText::new(heading).size(22.0));
-            ui.label(RichText::new(description).weak());
-        });
+        .fill(ui.visuals().window_fill)
+        .corner_radius(20)
+        .inner_margin(22)
+}
+fn surface(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) {
+    surface_frame(ui).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        contents(ui);
+    });
+}
+fn surface_row(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui, &mut egui::Ui)) {
+    ui.columns(2, |columns| {
+        let mut left = surface_frame(&columns[0]).begin(&mut columns[0]);
+        let mut right = surface_frame(&columns[1]).begin(&mut columns[1]);
+        left.content_ui.set_width(left.content_ui.available_width());
+        right
+            .content_ui
+            .set_width(right.content_ui.available_width());
+        contents(&mut left.content_ui, &mut right.content_ui);
+        // Measure both contents before painting so their backgrounds match this frame.
+        let bottom = left
+            .content_ui
+            .min_rect()
+            .bottom()
+            .max(right.content_ui.min_rect().bottom());
+        left.content_ui.expand_to_include_y(bottom);
+        right.content_ui.expand_to_include_y(bottom);
+        left.end(&mut columns[0]);
+        right.end(&mut columns[1]);
+    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::{Arc, atomic::AtomicBool};
+
+    #[test]
+    fn choosing_artwork_prepares_preview_and_failed_replacement_clears_it() {
+        let root = std::env::temp_dir().join(format!("aircard-gui-artwork-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        struct Clean(PathBuf);
+        impl Drop for Clean {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _clean = Clean(root.clone());
+        let source = root.join("artwork.png");
+        image::RgbaImage::from_pixel(80, 50, image::Rgba([20, 90, 160, 255]))
+            .save(&source)
+            .unwrap();
+        let invalid = root.join("invalid.png");
+        std::fs::write(&invalid, b"not an image").unwrap();
+        let ctx = egui::Context::default();
+        let mut app = App::empty(PathBuf::new(), false);
+        for (path, valid) in [(source, true), (invalid, false)] {
+            let (tx, rx) = mpsc::channel();
+            app.local = Some(rx);
+            tx.send(Ok(LocalResult::Picked(
+                Field::CardInput,
+                Some(path.clone()),
+            )))
+            .unwrap();
+            app.poll(&ctx);
+            assert_eq!(PathBuf::from(&app.card_input), path);
+            assert!(app.card.is_none() && app.card_texture.is_none());
+            assert!(app.busy(), "selection must start preparation automatically");
+            let start = Instant::now();
+            while app.busy() && start.elapsed() < Duration::from_secs(5) {
+                app.poll(&ctx);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(!app.busy(), "artwork preparation deadline");
+            assert_eq!(app.card.is_some(), valid);
+            assert_eq!(app.card_texture.is_some(), valid);
+            assert_eq!(app.failed, !valid);
+            assert!(app.pending.is_none(), "preparation must not apply artwork");
+        }
+    }
 
     #[test]
     fn automatic_paths_keep_restore_inputs_and_recover_interrupted_operations_after_restart() {
@@ -1529,7 +1733,6 @@ esac
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
         let mut app = App::empty(binary, false);
         app.token.clear();
-        app.tab = Tab::Device;
         app.refresh();
         let ctx = egui::Context::default();
         let start = Instant::now();
@@ -1585,7 +1788,7 @@ esac
     }
 
     #[test]
-    fn token_download_error_keeps_actionable_hint_and_existing_selection() {
+    fn token_setup_error_keeps_actionable_hint_and_existing_selection() {
         let mut app = App::empty(PathBuf::new(), false);
         app.token = "existing-token.bin".into();
         let (tx, receiver) = mpsc::sync_channel(4);
@@ -1595,13 +1798,16 @@ esac
         });
         app.job_name = "Set up sync token".into();
         tx.send(Message::Event(
-            serde_json::json!({"event":"error","hint":"Check connection and retry setup."}),
+            serde_json::json!({"event":"error","hint":"Choose a writable path and retry setup."}),
         ))
         .unwrap();
         tx.send(Message::Finished(Err("exit 1".into()))).unwrap();
         app.poll(&egui::Context::default());
         assert_eq!(app.token, "existing-token.bin");
-        assert!(app.status.ends_with("Check connection and retry setup."));
+        assert!(
+            app.status
+                .ends_with("Choose a writable path and retry setup.")
+        );
         assert!(app.failed);
     }
 }

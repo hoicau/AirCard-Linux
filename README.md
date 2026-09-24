@@ -34,28 +34,29 @@ glibc, TLS/graphics libraries and the usbmuxd service; the archive is not fully 
 ## Apply a card background
 
 1. Connect and unlock your own already paired iPhone. Keep Books closed.
-2. In **Card artwork**, open PNG/JPEG/WebP and prepare the centered 1536 × 969 preview.
-3. In **Apply & restore**, **Automatic** selects a paired iPhone when only one is available,
-   preferring its USB connection. If multiple iPhones are connected, choose yours explicitly.
-   USB and Wi-Fi can still be selected manually. Card detection starts automatically.
-   Wait for **Waiting for Wallet**, then open Wallet on your iPhone and tap the intended card.
-   A single detected identifier is filled in automatically; multiple results require a choice.
-   Check the target and close Wallet. Detection stops after a match or 60 seconds.
-4. The sync token is downloaded automatically after a card is selected and saved privately
-   for future launches. **Get sync token automatically** also works for Restore/Recover;
-   **Use an existing token / show path** lets you choose your own file. Internet access,
-   `curl` and `ca-certificates` are needed for first-time setup. See [token setup](docs/SYNC-TOKEN.md).
-   Backup and recovery paths are generated automatically; **Advanced save locations** lets you override them.
-5. Review the target card and device, then confirm Apply. Reopen Wallet after completion.
+2. In **Apply Artwork**, select your iPhone. AirCard automatically chooses a paired iPhone
+   when only one is available, preferring USB. If multiple iPhones are connected, choose yours.
+   Card detection starts automatically. Wait for **Waiting for Wallet**, then open Wallet
+   on your iPhone and tap the intended card. A single detected identifier is selected automatically;
+   multiple results require a choice. Check the target and close Wallet.
+   Detection stops after a match or 60 seconds.
+3. Browse for PNG/JPEG/WebP under **Select artwork**. The centered 1536 × 969 preview updates
+   automatically. You can also enter a path and press Enter.
+4. The built-in sync token is saved automatically after a card is selected and kept privately
+   for future launches. Backup and recovery paths are generated automatically.
+   **Advanced Options** contains token setup, backup locations, restore/recovery, manual
+   USB/Wi-Fi selection and artwork exports. Token setup works offline, including the first launch. See [token setup](docs/SYNC-TOKEN.md).
+5. Click **Apply Artwork…**, review the target card and device, then confirm. Reopen Wallet
+   after completion.
 
 Detection reads Wallet activity from iPhone logs; it does not enumerate every stored card.
-If no identifier appears, return to Wallet's card list, click **Detect card again**, wait
+If no identifier appears, return to Wallet's card list, click **Scan**, wait
 for the prompt and reopen the intended card. If no logs arrive, unlock/reconnect over USB
 and refresh devices. Some cards or iOS versions may hide identifiers. Linux cannot open
 Wallet or select a card for you. A detected identifier can also come from background Wallet
 activity, so verify the target before applying; retry with only the intended card open if unsure.
 
-**Check device** verifies trust and file access without writing to the phone. The GUI checks
+**Advanced Options → Check device** verifies trust and file access without writing to the phone. The GUI checks
 that the adjacent CLI version matches before starting a task. **Help → Connection diagnostics**
 provides service checks and installation guidance. A transient timeout or disconnect while
 opening a read-only trust, log or file-access session gets one retry on the same device and
@@ -76,7 +77,7 @@ use SHA-256 digests; raw identifiers are not used as path names.
 Backups keep the previous artwork; recovery folders hold the progress and originals needed
 after an interruption. Recovery folders disappear after successful cleanup; backups remain.
 
-In **Restore or recover**, **Restore** selects the latest backup for the current iPhone
+In **Advanced Options → Restore or recover**, **Restore** selects the latest backup for the current iPhone
 and selected card. Switching cards refreshes this selection. Browse to choose an older
 or imported backup, including backups from the previous device-only directory layout.
 Existing files stay in their original locations. A new recovery path is generated automatically.
@@ -174,3 +175,8 @@ backups and journals are excluded from Git and archives. Logs contain counts and
 state, not raw device syslog or pairing material. Remove completed temporary resources and
 private test data after validation. See [installation and uninstall](docs/INSTALL.md) and
 [provenance](docs/PROVENANCE.md).
+
+## Credits
+- **[Lumid-Off](https://github.com/Lumid-Off)** (Windows Native Rust Port & Maintainer)
+- **[mak5er](https://github.com/mak5er)** (Original macOS App & Exploit Research)
+- **[AirLift](https://github.com/0xjohnnydev/airlift)** by **[0xjohnny (0xjohnnydev)](https://github.com/0xjohnnydev)**: Original AirTraffic/ATAirlock sandbox escape and proof of concept underlying `AirliftFFI`.

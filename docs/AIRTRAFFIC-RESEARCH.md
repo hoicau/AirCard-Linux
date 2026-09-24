@@ -50,7 +50,8 @@ The tested device requests a Grappa challenge. An explicit caller-supplied 84-by
 from the pinned public Linux implementation enabled the handshake. Without it the earlier
 attempt was rejected; pairing alone did not satisfy that check. Accepted capability values
 are validated before a token is sent. [Token setup](SYNC-TOKEN.md) documents the exact source.
-No Apple binary or authentication-token table is distributed with AirCard.
+The public compatibility-token table is now built into AirCard for offline setup.
+No Apple binary is distributed with AirCard.
 
 StreamingZip is a separate service and format: **big-endian** length plus binary-plist
 `MediaSubdir`, followed by the stored ZIP stream. Success requires its bounded

@@ -28,7 +28,7 @@ sudo apt-get install build-essential pkg-config curl ca-certificates \
 For compatible native CLI and GUI binaries:
 
 ```sh
-sudo apt-get install curl ca-certificates libimobiledevice-utils libusbmuxd-tools usbmuxd avahi-utils \
+sudo apt-get install libimobiledevice-utils libusbmuxd-tools usbmuxd avahi-utils \
   libx11-6 libxi6 libxcursor1 libxrandr2 libxkbcommon0 libxkbcommon-x11-0 \
   libwayland-client0 libegl1 libgl1 xdg-desktop-portal
 ```
@@ -55,7 +55,7 @@ sudo pacman -S --needed base-devel pkgconf curl ca-certificates \
 Runtime-only installation:
 
 ```sh
-sudo pacman -S --needed curl ca-certificates libimobiledevice libplist libusbmuxd usbmuxd avahi \
+sudo pacman -S --needed libimobiledevice libplist libusbmuxd usbmuxd avahi \
   libx11 libxi libxcursor libxrandr libxkbcommon libxkbcommon-x11 wayland mesa xdg-desktop-portal
 ```
 

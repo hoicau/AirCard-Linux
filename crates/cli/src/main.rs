@@ -52,7 +52,7 @@ struct Args {
 }
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Download and privately cache the pinned public sync token. No device required.
+    /// Privately cache the built-in sync token. Works offline; no device required.
     SetupToken {
         /// New token file; defaults to the per-user AirCard data directory.
         #[arg(long)]

@@ -159,7 +159,7 @@ pub fn progress_text(event: &Value) -> Option<&'static str> {
 pub fn error_message(event: &Value) -> Option<String> {
     if let Some(kind) = event["failure"]["kind"].as_str() {
         return Some(match kind {
-            "unsupported_grappa" => "This iPhone requested an unsupported sync authentication method. Keep the recovery directory; the downloaded token does not establish device compatibility.",
+            "unsupported_grappa" => "This iPhone requested an unsupported sync authentication method. Keep the recovery directory; the sync token does not establish device compatibility.",
             "device_rejected" => "The iPhone rejected the sync request. Check the sync token and iOS compatibility; keep any recovery directory.",
             "device_protected" => "The iPhone is locked or its data is protected. Unlock it and keep any recovery directory.",
             "precondition_changed" => "Books data changed during the operation. Close Books and keep the recovery directory.",
@@ -216,7 +216,7 @@ pub fn error_message(event: &Value) -> Option<String> {
             }.into());
         }
         if operation.starts_with("grappa_token") {
-            return Some("The sync token could not be read or is invalid. Use Get sync token automatically, or select an existing 84-byte token file with permissions 0600.".into());
+            return Some("The sync token could not be read or is invalid. Use Set up sync token, or select an existing 84-byte token file with permissions 0600.".into());
         }
         if let Some(reason) = operation.strip_prefix("local_input_") {
             return Some(match reason {
