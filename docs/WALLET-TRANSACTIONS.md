@@ -18,11 +18,28 @@ Media staging directory, where AFC can read them. Those bytes are saved durably 
 replacement. Existing background files are installed, exported for exact readback, then
 returned. Cache leaves are moved out so Wallet regenerates them. Books metadata is restored
 between phases; unexpected user content changes stop the operation.
+If ATC creates `Books/Managed` and an empty `.Managed.plist.lock`, restoration removes
+only this new scaffolding. Nonempty or changed locks and other managed content remain
+protected by the concurrent-change checks.
 
 A standalone card backup contains original artwork/cache bytes, expected applied artwork
 and the original device binding. It does not contain the Books snapshot. The backup becomes
 durable before the transaction enters `Committed`. Cleanup then removes only generated
 staging roots, never traversing symlinks. A completed transaction directory is deleted.
+
+## Extract
+
+`card-extract` creates a single artwork journal and captures only the allowed PNG/PDF files.
+It never installs replacement payloads, visits cache targets or creates a standalone restore
+backup. The existing recovery engine returns the original bytes, verifies exact readback,
+restores the catalog and removes staging before a new private ZIP is written. Missing resource
+variants are omitted; a card with none of the supported resources fails without an export.
+Existing output files, including symlinks, are refused.
+
+Extraction retains the `Running` phase until restoration and cleanup succeed. Cancellation,
+partial moves and disconnects use the same journal recovery path as Apply. `card-recover`
+accepts the single artwork part after a restart. A failed local export occurs after the
+device has been restored. The GUI requires `card_extract_complete` before reporting success.
 
 ## Restore and interruption
 

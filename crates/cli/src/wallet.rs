@@ -1,11 +1,11 @@
-//! Wallet-only application and restoration, sharing the tested native transaction engine.
+//! Wallet artwork application, extraction and restoration using durable transactions.
 use crate::{
     Bridge, Command,
     customization::{FileJournal, Journal, Session, finish, load, read_slot},
     emit, local,
 };
 use aircard_core::{
-    assets::PreparedCard,
+    assets::{PreparedCard, Resource, resources_zip},
     books::MAX_FILE_BYTES,
     customization::{Plan, Step, Target},
     staging::StagingPlan,
@@ -168,6 +168,23 @@ fn leaves(index: usize) -> Vec<String> {
 }
 pub fn offline(command: &Command) -> Result<Option<u8>> {
     match command {
+        Command::CardExtract {
+            card_hash,
+            output,
+            apply,
+            ..
+        } => {
+            target(card_hash, 0)
+                .validate()
+                .map_err(|_| invalid("card_hash"))?;
+            check_extract_output(output)?;
+            if *apply {
+                return Ok(None);
+            }
+            emit(
+                &json!({"event":"dry_run","applied":false,"scope":"extract selected Wallet card PNG/PDF artwork","plan":["private recovery directory","preserve device data","temporarily move and read current artwork","restore and verify original artwork","restore device data and remove staging","save original PNG/PDF bytes in a new ZIP"],"artwork_replaced":false,"caches_changed":false}),
+            );
+        }
         Command::CardTest {
             card_hash,
             apply: false,
@@ -222,6 +239,38 @@ pub fn offline(command: &Command) -> Result<Option<u8>> {
         _ => return Ok(None),
     }
     Ok(Some(0))
+}
+fn check_extract_output(output: &Path) -> Result<()> {
+    match output.symlink_metadata() {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        _ => {
+            return Err(Error::new(
+                ErrorKind::Conflict,
+                "card_extract_output_exists",
+            ));
+        }
+    }
+    let parent = output
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    if !parent.is_dir() {
+        return Err(invalid("card_extract_output_parent"));
+    }
+    Ok(())
+}
+fn extracted_resources(j: &Journal) -> Result<Vec<Resource>> {
+    j.validate()?;
+    if !matches!(j.plan.target, Target::WalletArtwork(_)) || j.originals.is_empty() {
+        return Err(invalid("card_artwork_not_found"));
+    }
+    Ok(j.originals
+        .iter()
+        .map(|(&i, bytes)| Resource {
+            relative_path: j.plan.leaves[i].clone(),
+            data: bytes.clone(),
+        })
+        .collect())
 }
 fn journal_temporary(name: &str) -> bool {
     name.strip_prefix(".aircard-journal-")
@@ -411,29 +460,11 @@ fn install(
     file: &mut FileJournal<'_>,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<()> {
-    let indices: Vec<_> = (0..j.plan.leaves.len()).collect();
-    j.export_started = true;
-    file.save(j)?;
-    emit(
-        &json!({"event":"stage","stage":if matches!(j.plan.target, Target::WalletCache { .. }) { "refresh_caches" } else { "read_original_artwork" }}),
-    );
-    session.sync(afc, j, Step::ExportOriginals, &indices, cancelled)?;
-    for i in indices {
-        if let Some(bytes) = read_slot(afc, &j.plan.slot("original", i))? {
-            j.originals.insert(i, bytes);
-        }
-    }
-    file.save(j)?;
-    emit(
-        &json!({"event":"card_part_backed_up","cache":matches!(j.plan.target,Target::WalletCache{..}),"files":j.originals.len(),"bytes":j.originals.values().map(Vec::len).sum::<usize>()}),
-    );
+    capture_originals(session, afc, j, file, cancelled, false)?;
     if matches!(j.plan.target, Target::WalletCache { .. }) {
         // Moving generated cache entries out invalidates them. Wallet regenerates them from artwork.
         emit(&json!({"event":"wallet_cache_invalidated","files":j.originals.len()}));
         return Ok(());
-    }
-    if j.originals.is_empty() {
-        return Err(invalid("card_artwork_not_found"));
     }
     let active: Vec<_> = j.originals.keys().copied().collect();
     j.apply_started = true;
@@ -461,6 +492,35 @@ fn install(
     emit(&json!({"event":"card_artwork_verified","files":active.len(),"readback_verified":true}));
     Ok(())
 }
+fn capture_originals(
+    session: &Session<'_>,
+    afc: &mut device::LinuxAfc,
+    j: &mut Journal,
+    file: &mut FileJournal<'_>,
+    cancelled: &dyn Fn() -> bool,
+    extracting: bool,
+) -> Result<()> {
+    let indices: Vec<_> = (0..j.plan.leaves.len()).collect();
+    j.export_started = true;
+    file.save(j)?;
+    emit(
+        &json!({"event":"stage","stage":if extracting { "extract_artwork" } else if matches!(j.plan.target, Target::WalletCache { .. }) { "refresh_caches" } else { "read_original_artwork" }}),
+    );
+    session.sync(afc, j, Step::ExportOriginals, &indices, cancelled)?;
+    for i in indices {
+        if let Some(bytes) = read_slot(afc, &j.plan.slot("original", i))? {
+            j.originals.insert(i, bytes);
+        }
+    }
+    file.save(j)?;
+    emit(
+        &json!({"event":if extracting { "card_artwork_captured" } else { "card_part_backed_up" },"cache":matches!(j.plan.target,Target::WalletCache{..}),"files":j.originals.len(),"bytes":j.originals.values().map(Vec::len).sum::<usize>()}),
+    );
+    if matches!(j.plan.target, Target::WalletArtwork(_)) && j.originals.is_empty() {
+        return Err(invalid("card_artwork_not_found"));
+    }
+    Ok(())
+}
 pub fn run(
     command: &Command,
     provider: &device::LinuxDeviceProvider,
@@ -478,6 +538,11 @@ pub fn run(
             ..
         }
         | Command::CardApply {
+            journal,
+            grappa_token,
+            ..
+        }
+        | Command::CardExtract {
             journal,
             grappa_token,
             ..
@@ -533,6 +598,7 @@ pub fn run(
         return Err(invalid("card_backup_device_mismatch"));
     }
     let (hash, card, hold, backup_path) = match command {
+        Command::CardExtract { card_hash, .. } => (card_hash.clone(), None, None, None),
         Command::CardTest {
             card_hash,
             hold_seconds,
@@ -606,8 +672,9 @@ pub fn run(
         return Err(e);
     }
     let mut journals = Vec::new();
+    let extracting = matches!(command, Command::CardExtract { .. });
     let operation = (|| -> Result<()> {
-        for part in 0..3 {
+        for part in 0..if extracting { 1 } else { 3 } {
             let transaction = std::fs::read_to_string("/proc/sys/kernel/random/uuid")
                 .map_err(|_| invalid("card_transaction"))?
                 .trim()
@@ -623,7 +690,10 @@ pub fn run(
             })?;
             emit(&json!({"event":"stage","stage":"preserve_catalog"}));
             let books = device::books::capture_stable(&mut afc, &cancelled)?;
-            let payloads = if let Some(b) = &restore_backup {
+            let payloads = if extracting {
+                // Staging needs the link, but extraction never installs these payloads.
+                vec![vec![]; plan.leaves.len()]
+            } else if let Some(b) = &restore_backup {
                 b.parts[part].applied.clone()
             } else if part == 0 {
                 card.as_ref()
@@ -655,7 +725,9 @@ pub fn run(
             let j = journals.last_mut().unwrap();
             let mut file = FileJournal { path: &path, bytes };
             stage(&session, &mut afc, j, &cancelled)?;
-            if let Some(backup) = &restore_backup {
+            if extracting {
+                capture_originals(&session, &mut afc, j, &mut file, &cancelled, true)?;
+            } else if let Some(backup) = &restore_backup {
                 emit(&json!({"event":"stage","stage":"restore_originals"}));
                 j.originals = backup.parts[part].originals.clone();
                 j.export_started = true;
@@ -688,13 +760,25 @@ pub fn run(
         }
         Ok(())
     })();
-    if hold.is_some() || operation.is_err() {
+    if extracting || hold.is_some() || operation.is_err() {
         let recovered = restore_all(&session, journal, &mut journals);
         emit(
-            &json!({"event":"card_test_complete","ok":operation.is_ok() && recovered.is_ok(),"operation_error":operation.as_ref().err(),"recovery_error":recovered.as_ref().err(),"journal_retained":recovered.is_err()}),
+            &json!({"event":if extracting { "card_extract_restored" } else { "card_test_complete" },"ok":operation.is_ok() && recovered.is_ok(),"operation_error":operation.as_ref().err(),"recovery_error":recovered.as_ref().err(),"journal_retained":recovered.is_err()}),
         );
         recovered?;
         operation?;
+        if let Command::CardExtract { output, .. } = command {
+            if cancelled() {
+                return Ok(130);
+            }
+            emit(&json!({"event":"stage","stage":"save_extracted_artwork"}));
+            let resources = extracted_resources(&journals[0])?;
+            let bytes = resources_zip(&resources).map_err(|_| invalid("card_extract_archive"))?;
+            local::write_new(output, &bytes)?;
+            emit(
+                &json!({"event":"card_extract_complete","ok":true,"files":resources.len(),"artwork_restored":true,"caches_changed":false}),
+            );
+        }
         return Ok(if cancelled() { 130 } else { 0 });
     }
     set_phase(journal, Phase::Committed)?;
@@ -767,6 +851,74 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+    #[test]
+    fn extraction_keeps_original_bytes_and_single_part_recovery() {
+        let dir = Directory::new();
+        let manifest = Manifest {
+            phase: Phase::Running,
+            schema: 1,
+            device: "a".repeat(64),
+            card: "AAoUHigyPEZQWmRueIKMlqCqtL4=".into(),
+        };
+        local::write_new(
+            &dir.0.join("manifest.json"),
+            &serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let mut journal = Journal {
+            schema: 1,
+            device: manifest.device.clone(),
+            plan: Plan {
+                transaction: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into(),
+                target: target(&manifest.card, 0),
+                leaves: leaves(0),
+            },
+            books: aircard_core::books::BooksSnapshot {
+                entries: Default::default(),
+            },
+            originals: BTreeMap::from([
+                (0, b"exact PNG bytes".to_vec()),
+                (2, b"exact PDF bytes".to_vec()),
+            ]),
+            payloads: vec![vec![]; 3],
+            export_started: true,
+            apply_started: false,
+            restored: false,
+            rollback_round: 0,
+            checksum: String::new(),
+        };
+        local::write_new(&dir.0.join("0.json"), &journal.bytes().unwrap()).unwrap();
+        let (_, parts) = read_journal(&dir.0).unwrap();
+        assert_eq!(
+            parts.len(),
+            1,
+            "Recovery must accept an extraction without cache parts"
+        );
+        assert!(!parts[0].apply_started);
+        let resources = extracted_resources(&parts[0]).unwrap();
+        assert_eq!(resources.len(), 2, "Missing @2x must not be synthesized");
+        assert_eq!(resources[0].relative_path, "cardBackgroundCombined@3x.png");
+        assert_eq!(resources[0].data, b"exact PNG bytes");
+        assert_eq!(resources[1].relative_path, "cardBackgroundCombined.pdf");
+        assert_eq!(resources[1].data, b"exact PDF bytes");
+        let output = dir.0.join("artwork.zip");
+        let bytes = resources_zip(&resources).unwrap();
+        local::write_new(&output, &bytes).unwrap();
+        assert_eq!(
+            std::fs::metadata(&output).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(local::write_new(&output, b"replacement").is_err());
+        assert_eq!(std::fs::read(&output).unwrap(), bytes);
+        journal.originals.clear();
+        journal.bytes().unwrap();
+        assert!(extracted_resources(&journal).is_err());
+        journal.plan.target = target(&manifest.card, 1);
+        journal.plan.leaves = leaves(1);
+        journal.originals.insert(0, b"cache".to_vec());
+        journal.bytes().unwrap();
+        assert!(extracted_resources(&journal).is_err());
     }
     #[test]
     fn journal_interrupted_atomic_write_and_cleanup_are_recoverable() {

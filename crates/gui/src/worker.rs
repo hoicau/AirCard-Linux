@@ -143,6 +143,7 @@ fn run(
             Some("scan") => "syslog_complete",
             Some("probe") => "probe_complete",
             Some("card-apply" | "card-restore") => "card_operation_complete",
+            Some("card-extract") => "card_extract_complete",
             Some("card-recover") => "card_recovery_complete",
             Some("prepare-card") => "card_prepared",
             _ => "unsupported_worker_command",
@@ -242,6 +243,42 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn extraction_requires_its_own_completion_event() {
+        use std::os::unix::fs::PermissionsExt;
+        let path =
+            std::env::temp_dir().join(format!("aircard-extract-worker-{}", std::process::id()));
+        struct Clean(PathBuf);
+        impl Drop for Clean {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let _clean = Clean(path.clone());
+        for (event_name, success) in [
+            ("card_extract_restored", false),
+            ("card_operation_complete", false),
+            ("card_extract_complete", true),
+        ] {
+            std::fs::write(
+                &path,
+                format!("#!/bin/sh\nprintf '%s\\n' '{{\"event\":\"{event_name}\"}}'\n"),
+            )
+            .unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let (tx, _rx) = mpsc::sync_channel(4);
+            assert_eq!(
+                run(
+                    &path,
+                    &["card-extract".into(), "--apply".into()],
+                    &AtomicBool::new(false),
+                    &tx
+                )
+                .is_ok(),
+                success
+            );
+        }
+    }
     #[test]
     fn loader_diagnostics_show_only_the_missing_library_or_glibc_requirement() {
         let message = loader_error(b"/private/downloads/aircard: error while loading shared libraries: libusbmuxd-2.0.so.6: cannot open shared object file: No such file or directory\n").unwrap();

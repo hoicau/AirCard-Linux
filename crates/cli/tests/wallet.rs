@@ -1,5 +1,72 @@
 use std::process::Command;
 #[test]
+fn extraction_validates_offline_without_an_image_backup_or_token() {
+    let directory =
+        std::env::temp_dir().join(format!("aircard-extract-input-{}", std::process::id()));
+    std::fs::create_dir(&directory).unwrap();
+    struct Clean(std::path::PathBuf);
+    impl Drop for Clean {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _clean = Clean(directory.clone());
+    let output_path = directory.join("artwork.zip");
+    let journal = directory.join("recovery");
+    let run = |hash: &str, apply: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_aircard"));
+        command
+            .args(["card-extract", "--card-hash", hash, "--output"])
+            .arg(&output_path)
+            .arg("--journal")
+            .arg(&journal)
+            .args(["--grappa-token", "/nonexistent/token"])
+            .env(
+                "USBMUXD_SOCKET_ADDRESS",
+                "unix:/nonexistent/aircard-test.socket",
+            );
+        if apply {
+            command.arg("--apply");
+        }
+        command.output().unwrap()
+    };
+    let valid_hash = "AAoUHigyPEZQWmRueIKMlqCqtL4=";
+    let result = run(valid_hash, false);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let event: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(event["event"], "dry_run");
+    assert_eq!(event["artwork_replaced"], false);
+    assert_eq!(event["caches_changed"], false);
+    assert!(!output_path.exists() && !journal.exists());
+    for apply in [false, true] {
+        let result = run("../other", apply);
+        assert!(!result.status.success());
+        let event: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(event["error"]["operation"], "card_hash");
+    }
+    std::fs::write(&output_path, b"keep existing output").unwrap();
+    for apply in [false, true] {
+        let result = run(valid_hash, apply);
+        assert!(!result.status.success());
+        let event: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(event["error"]["operation"], "card_extract_output_exists");
+    }
+    assert_eq!(
+        std::fs::read(&output_path).unwrap(),
+        b"keep existing output"
+    );
+    std::fs::remove_file(&output_path).unwrap();
+    std::os::unix::fs::symlink(directory.join("missing"), &output_path).unwrap();
+    let result = run(valid_hash, true);
+    let event: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(event["error"]["operation"], "card_extract_output_exists");
+    assert!(!journal.exists());
+}
+#[test]
 fn restore_validation_reports_backup_failures_without_reading_the_token() {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let directory = std::env::temp_dir().join(format!(

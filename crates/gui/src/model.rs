@@ -139,6 +139,8 @@ pub fn progress_text(event: &Value) -> Option<&'static str> {
         Some("start_afc") => Some("Checking file access"),
         Some("prepare_transfer") => Some("Preparing artwork transfer"),
         Some("read_original_artwork") => Some("Backing up original artwork"),
+        Some("extract_artwork") => Some("Reading current card artwork"),
+        Some("save_extracted_artwork") => Some("Saving extracted artwork"),
         Some("write_artwork") => Some("Writing card artwork"),
         Some("verify_artwork") => Some("Verifying card artwork"),
         Some("refresh_caches") => Some("Refreshing Wallet caches"),
@@ -171,6 +173,12 @@ pub fn error_message(event: &Value) -> Option<String> {
     }
     let error = &event["error"];
     if let Some(operation) = error["operation"].as_str() {
+        match operation {
+            "card_extract_output_exists" => return Some("Choose a new ZIP filename. The selected output already exists and will be preserved.".into()),
+            "card_extract_output_parent" => return Some("Choose an existing folder for the artwork ZIP.".into()),
+            "card_artwork_not_found" => return Some("No supported PNG/PDF artwork was found for this card. Check the selected card and review recovery status before retrying.".into()),
+            _ => {}
+        }
         if let Some(reason) = operation.strip_prefix("card_backup_input_") {
             let guidance = match reason {
                 "not_found" => {

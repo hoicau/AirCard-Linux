@@ -400,6 +400,23 @@ fn owned_change(path: &str, plan: &TestPlan) -> bool {
         || path == plan.temporary()
         || ["Books", "Books/Sync", "Books/Sync/Database"].contains(&path)
 }
+// iOS may create this empty sync lock during ATC even when Books is closed.
+// Only new, empty scaffolding is ours to remove; managed books and changed locks
+// still trigger the ordinary conflict checks before any restoration writes.
+fn new_managed_sync_scaffold(
+    path: &str,
+    snapshot: &BooksSnapshot,
+    current: &BooksSnapshot,
+) -> bool {
+    if snapshot.entries.contains_key(path) {
+        return false;
+    }
+    match (path, current.entries.get(path)) {
+        ("Books/Managed", Some(SnapshotEntry::Directory)) => true,
+        ("Books/Managed/.Managed.plist.lock", Some(SnapshotEntry::File(bytes))) => bytes.is_empty(),
+        _ => false,
+    }
+}
 /// Restore known metadata and this test's asset only. Unknown concurrent changes are preserved.
 /// A conflict leaves the durable snapshot available for explicit recovery; it is never hidden.
 pub fn restore(afc: &mut impl AfcAccess, snapshot: &BooksSnapshot, plan: &TestPlan) -> Result<()> {
@@ -412,6 +429,7 @@ pub fn restore(afc: &mut impl AfcAccess, snapshot: &BooksSnapshot, plan: &TestPl
         if current.entries.get(path) != snapshot.entries.get(path)
             && current.entries.contains_key(path)
             && !owned_change(path, plan)
+            && !new_managed_sync_scaffold(path, snapshot, &current)
         {
             return Err(Error::new(
                 ErrorKind::Conflict,
@@ -460,6 +478,14 @@ pub fn restore(afc: &mut impl AfcAccess, snapshot: &BooksSnapshot, plan: &TestPl
     added.sort_by_key(|p| std::cmp::Reverse(p.split('/').count()));
     for path in added {
         if !missing(afc, &path)? {
+            if path == "Books/Managed/.Managed.plist.lock"
+                && !afc.read(&path, MAX_FILE_BYTES)?.is_empty()
+            {
+                return Err(Error::new(
+                    ErrorKind::Conflict,
+                    "unrelated_books_change_preserved",
+                ));
+            }
             afc.remove(&path)?;
         }
     }
@@ -683,6 +709,46 @@ mod tests {
             ErrorKind::Conflict
         );
         assert_eq!(mock.entries, before);
+    }
+    #[test]
+    fn new_empty_managed_sync_lock_is_cleaned_but_managed_content_is_preserved() {
+        for case in ["empty", "nonempty-lock", "managed-book", "changed-lock"] {
+            let (mut mock, mut snapshot, plan) = setup();
+            if case == "changed-lock" {
+                snapshot
+                    .entries
+                    .insert("Books/Managed".into(), SnapshotEntry::Directory);
+                snapshot.entries.insert(
+                    "Books/Managed/.Managed.plist.lock".into(),
+                    SnapshotEntry::File(b"existing".to_vec()),
+                );
+            }
+            mock.entries
+                .insert("Books/Managed".into(), SnapshotEntry::Directory);
+            mock.entries.insert(
+                "Books/Managed/.Managed.plist.lock".into(),
+                SnapshotEntry::File(if case == "nonempty-lock" {
+                    b"preserve".to_vec()
+                } else {
+                    vec![]
+                }),
+            );
+            if case == "managed-book" {
+                mock.entries.insert(
+                    "Books/Managed/user.epub".into(),
+                    SnapshotEntry::File(b"user book".to_vec()),
+                );
+            }
+            let before = mock.entries.clone();
+            let result = restore(&mut mock, &snapshot, &plan);
+            if case == "empty" {
+                result.unwrap();
+                assert_eq!(mock.entries, snapshot.entries);
+            } else {
+                assert_eq!(result.unwrap_err().kind, ErrorKind::Conflict, "{case}");
+                assert_eq!(mock.entries, before, "{case}");
+            }
+        }
     }
     #[test]
     fn cancelled_or_stale_snapshot_never_stages() {

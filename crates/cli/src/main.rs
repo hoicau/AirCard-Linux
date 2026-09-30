@@ -96,6 +96,21 @@ enum Command {
         #[arg(long)]
         apply: bool,
     },
+    /// Extract the selected card's current PNG/PDF resources into a new ZIP, then restore them.
+    CardExtract {
+        #[arg(long)]
+        card_hash: String,
+        /// New ZIP file containing the original artwork bytes.
+        #[arg(long)]
+        output: std::path::PathBuf,
+        #[arg(long)]
+        journal: std::path::PathBuf,
+        #[arg(long)]
+        grappa_token: std::path::PathBuf,
+        /// Allow the temporary device moves required to read and return the artwork.
+        #[arg(long)]
+        apply: bool,
+    },
     /// Restore a card backup on its original paired device.
     CardRestore {
         input: std::path::PathBuf,
@@ -170,9 +185,10 @@ fn watchdog(args: &Args, cancel: &AtomicBool) -> u8 {
         Command::Scan { duration, .. } => *duration + args.timeout * 4 + 10,
         Command::Probe => args.timeout * 4 + 10,
         Command::CardTest { hold_seconds, .. } => args.timeout * 30 + hold_seconds + 90,
-        Command::CardApply { .. } | Command::CardRestore { .. } | Command::CardRecover { .. } => {
-            args.timeout * 30 + 90
-        }
+        Command::CardApply { .. }
+        | Command::CardExtract { .. }
+        | Command::CardRestore { .. }
+        | Command::CardRecover { .. } => args.timeout * 30 + 90,
         _ => args.timeout + 5,
     };
     let start = Instant::now();
@@ -197,6 +213,7 @@ fn watchdog(args: &Args, cancel: &AtomicBool) -> u8 {
                 args.command,
                 Command::CardTest { .. }
                     | Command::CardApply { .. }
+                    | Command::CardExtract { .. }
                     | Command::CardRestore { .. }
                     | Command::CardRecover { .. }
             ) {
@@ -286,6 +303,7 @@ fn run(args: &Args, cancel: &AtomicBool) -> device::Result<u8> {
         }
         Command::CardTest { .. }
         | Command::CardApply { .. }
+        | Command::CardExtract { .. }
         | Command::CardRestore { .. }
         | Command::CardRecover { .. } => {
             return wallet::run(&args.command, &provider, &selected, args.timeout, cancel);

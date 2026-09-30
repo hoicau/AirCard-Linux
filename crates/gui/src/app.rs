@@ -27,6 +27,7 @@ enum Tab {
 enum Field {
     CardInput,
     CardOutput,
+    ExtractOutput,
     Snapshot,
     BackupOutput,
     Recovery,
@@ -45,7 +46,7 @@ struct Smoke {
     requested: bool,
     started: Instant,
 }
-const SMOKE_NAMES: [&str; 16] = [
+const SMOKE_NAMES: [&str; 19] = [
     "artwork-light",
     "artwork-dark",
     "help-light",
@@ -62,6 +63,9 @@ const SMOKE_NAMES: [&str; 16] = [
     "empty-light",
     "empty-dark",
     "setup-compact",
+    "extract-light",
+    "extract-confirmation-dark",
+    "extract-compact",
 ];
 pub struct App {
     cli: PathBuf,
@@ -69,6 +73,7 @@ pub struct App {
     dark: bool,
     card_input: String,
     card_output: String,
+    extract_output: String,
     card: Option<PreparedCard>,
     card_texture: Option<TextureHandle>,
     cards: Vec<String>,
@@ -175,6 +180,7 @@ impl App {
             dark,
             card_input: String::new(),
             card_output: String::new(),
+            extract_output: String::new(),
             card: None,
             card_texture: None,
             cards: vec![],
@@ -425,6 +431,10 @@ impl App {
             let mut dialog = rfd::FileDialog::new();
             if matches!(field, Field::CardInput) {
                 dialog = dialog.add_filter("Artwork", &["png", "jpg", "jpeg", "webp"]);
+            } else if matches!(field, Field::ExtractOutput) {
+                dialog = dialog
+                    .add_filter("ZIP archive", &["zip"])
+                    .set_file_name("card-artwork.zip");
             }
             let path = if matches!(field, Field::Recovery) {
                 dialog.pick_folder()
@@ -456,6 +466,7 @@ impl App {
         match field {
             Field::CardInput => &mut self.card_input,
             Field::CardOutput => &mut self.card_output,
+            Field::ExtractOutput => &mut self.extract_output,
             Field::Snapshot => &mut self.snapshot,
             Field::BackupOutput => &mut self.backup_output,
             Field::Recovery => &mut self.recovery,
@@ -601,6 +612,11 @@ impl App {
                                 .into();
                             } else if self.job_name == "Set up sync token" {
                                 self.status = "Sync token ready and selected. It will be reused next time. Close Wallet and Books before applying.".into();
+                            } else if self.job_name == "Extract card artwork" {
+                                self.status = format!(
+                                    "Current card artwork saved to {}. Original artwork restored and verified.",
+                                    self.extract_output
+                                );
                             } else if self.job_name == "Check device" {
                                 self.status = "Trust and file access verified. Sync authentication and artwork compatibility are checked during the operation.".into();
                             } else if self.job_name == "Discover devices" && self.chosen().is_none()
@@ -691,6 +707,8 @@ impl App {
                     self.status = "File selected.".into();
                     if matches!(field, Field::CardInput) {
                         self.prepare_artwork();
+                    } else if matches!(field, Field::ExtractOutput) {
+                        self.review_extract();
                     }
                 }
                 Ok(LocalResult::Picked(_, None)) => {
@@ -732,7 +750,7 @@ impl App {
     }
     fn card_configuration(&mut self, ui: &mut egui::Ui) {
         ui.label(RichText::new("Card Configuration").size(21.0));
-        ui.label(RichText::new("Choose a Wallet card and its replacement artwork.").weak());
+        ui.label(RichText::new("Choose a Wallet card to extract or replace its artwork.").weak());
         ui.add_space(12.0);
         self.card_selector(ui);
         ui.add_space(12.0);
@@ -912,7 +930,7 @@ impl App {
             RichText::new(if self.discovery.listening {
                 "Open Wallet and tap the intended card now."
             } else if !self.card_hash.is_empty() {
-                "Check the selected card, then close Wallet before applying."
+                "Check the selected card, then close Wallet before continuing."
             } else if self.discovery.finished {
                 "No card selected. Scan again and open the intended card in Wallet."
             } else {
@@ -921,6 +939,36 @@ impl App {
             .small()
             .weak(),
         );
+        self.sync_saved_paths();
+        if ui
+            .add_enabled(self.extract_ready(), egui::Button::new("Extract artwork…"))
+            .on_hover_text("Save this card's current PNG/PDF artwork as a ZIP archive.")
+            .clicked()
+        {
+            self.picker(Field::ExtractOutput, true);
+        }
+    }
+    fn extract_ready(&self) -> bool {
+        self.operation_connected()
+            && !self.journal.trim().is_empty()
+            && !self.recovery_pending()
+            && aircard_core::customization::Target::WalletArtwork(self.card_hash.clone())
+                .validate()
+                .is_ok()
+    }
+    fn review_extract(&mut self) {
+        if !self.extract_ready() || self.extract_output.trim().is_empty() {
+            return;
+        }
+        let mut args = vec![
+            "card-extract".into(),
+            "--card-hash".into(),
+            self.card_hash.clone(),
+            "--output".into(),
+            self.extract_output.trim().into(),
+        ];
+        args.extend(self.operation_args());
+        self.review("Extract card artwork", "Save this card's current PNG/PDF artwork in a new ZIP. AirCard temporarily moves the original files to read them, then restores and verifies them. Keep Wallet and Books closed until complete.", args);
     }
     fn connection_options(&mut self, ui: &mut egui::Ui) {
         ui.label(RichText::new("Connection").strong());
@@ -1010,7 +1058,7 @@ impl App {
             self.review("Apply card artwork", "Replace this card's background and save its original artwork in the backup below. Keep Wallet and Books closed during the operation. Reopen Wallet when complete.", args);
         }
         if recovery_pending {
-            ui.label("An unfinished operation was found. Open Advanced Options and recover on the original iPhone before applying another change.");
+            ui.label("An unfinished operation was found. Open Advanced Options and recover on the original iPhone before applying or extracting artwork.");
         }
     }
     fn advanced(&mut self, ui: &mut egui::Ui) {
@@ -1192,7 +1240,9 @@ impl App {
                 ui.label(&c.summary);
                 ui.add_space(8.0);
                 for pair in c.args.windows(2) {
-                    if ["--journal", "--backup", "--card-hash"].contains(&pair[0].as_str()) {
+                    if ["--journal", "--backup", "--card-hash", "--output"]
+                        .contains(&pair[0].as_str())
+                    {
                         ui.label(format!("{}: {}", pair[0].trim_start_matches('-'), pair[1]));
                     }
                 }
@@ -1252,14 +1302,14 @@ impl App {
         if smoke.frames == 0 {
             smoke.started = Instant::now();
             let phase = smoke.phase;
-            self.dark = matches!(phase, 1 | 4 | 7 | 9 | 14);
+            self.dark = matches!(phase, 1 | 4 | 7 | 9 | 14 | 17);
             self.tab = match phase {
                 2 => Tab::Help,
                 3 | 8..=11 | 15 => Tab::Advanced,
                 _ => Tab::Artwork,
             };
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(
-                if matches!(phase, 5 | 8 | 11 | 12 | 15) {
+                if matches!(phase, 5 | 8 | 11 | 12 | 15 | 18) {
                     Vec2::new(680.0, 520.0)
                 } else {
                     Vec2::new(1080.0, 780.0)
@@ -1303,6 +1353,21 @@ impl App {
             }
             if phase == 4 {
                 self.review("Apply card artwork", "Replace the selected card background and save its original artwork in a private backup. This is a UI fixture; no device operation will run.", vec!["card-apply".into(), "synthetic.png".into(), "--backup".into(), "card-backup.json".into(), "--journal".into(), "recovery".into(), "--card-hash".into(), "fixture-card-identifier".into()]);
+            }
+            if phase >= 16 {
+                self.devices = vec![Device {
+                    udid: "synthetic-test-000001".into(),
+                    route: "usb".into(),
+                    ios: "27.0 (fixture)".into(),
+                    paired: true,
+                    status: "paired_session_verified".into(),
+                }];
+                self.selected = Some(0);
+                self.card_hash = "AAoUHigyPEZQWmRueIKMlqCqtL4=".into();
+                self.extract_output = "card-artwork.zip".into();
+                if phase == 17 {
+                    self.review_extract();
+                }
             }
         }
     }
@@ -1570,6 +1635,56 @@ fn surface_row(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui, &mut egui
 mod tests {
     use super::*;
     use std::sync::{Arc, atomic::AtomicBool};
+
+    #[test]
+    fn extraction_requires_a_card_and_device_but_no_replacement_image_or_backup() {
+        let mut app = App::empty(PathBuf::new(), false);
+        app.devices.push(Device {
+            udid: "fixture-phone".into(),
+            route: "usb".into(),
+            ios: "fixture".into(),
+            paired: true,
+            status: "paired_session_verified".into(),
+        });
+        app.selected = Some(0);
+        app.card_hash = "AAoUHigyPEZQWmRueIKMlqCqtL4=".into();
+        app.token = "private-token.bin".into();
+        app.journal = "/nonexistent/aircard-extract-recovery".into();
+        assert!(app.extract_ready());
+        assert!(app.card.is_none() && app.card_input.is_empty() && app.backup_output.is_empty());
+        let (tx, rx) = mpsc::channel();
+        app.local = Some(rx);
+        tx.send(Ok(LocalResult::Picked(
+            Field::ExtractOutput,
+            Some("card-artwork.zip".into()),
+        )))
+        .unwrap();
+        app.poll(&egui::Context::default());
+        let confirmation = app.pending.take().unwrap();
+        assert_eq!(confirmation.device.udid, "fixture-phone");
+        assert_eq!(confirmation.args[0], "card-extract");
+        assert!(
+            confirmation
+                .args
+                .windows(2)
+                .any(|p| p == ["--output", "card-artwork.zip"])
+        );
+        assert!(
+            !confirmation
+                .args
+                .iter()
+                .any(|a| a == "--backup" || a == "--apply")
+        );
+        assert!(!app.busy(), "Choosing an output only prepares the review");
+        app.device_check = Some(false);
+        assert!(!app.extract_ready());
+        app.device_check = None;
+        app.recovery = std::env::temp_dir().to_string_lossy().into_owned();
+        assert!(!app.extract_ready(), "Pending recovery blocks extraction");
+        app.recovery.clear();
+        app.card_hash.clear();
+        assert!(!app.extract_ready());
+    }
 
     #[test]
     fn choosing_artwork_prepares_preview_and_failed_replacement_clears_it() {

@@ -5,10 +5,10 @@ import struct
 import sys
 
 root = pathlib.Path(sys.argv[1])
-for name in ["artwork-light", "artwork-dark", "help-light", "advanced-light", "confirmation-dark", "compact-light", "listening-light", "no-card-dark", "advanced-compact-light", "save-locations-dark", "restore-light", "save-locations-compact", "empty-light", "empty-dark", "preview-compact", "setup-compact"]:
+for name in ["artwork-light", "artwork-dark", "help-light", "advanced-light", "confirmation-dark", "compact-light", "listening-light", "no-card-dark", "advanced-compact-light", "save-locations-dark", "restore-light", "save-locations-compact", "empty-light", "empty-dark", "preview-compact", "setup-compact", "extract-light", "extract-confirmation-dark", "extract-compact"]:
     data = (root / f"{name}.png").read_bytes()
     assert data[:8] == b"\x89PNG\r\n\x1a\n", name
     width, height = struct.unpack(">II", data[16:24])
     assert width >= 680 and height >= 520 and len(data) > 5000, (name, width, height)
 assert (root / "artwork-light.png").read_bytes() != (root / "artwork-dark.png").read_bytes()
-print("Sixteen native GUI views captured, including horizontal navigation, artwork, advanced options and compact layouts.")
+print("Nineteen native GUI views captured, including artwork extraction, confirmation, advanced options and compact layouts.")

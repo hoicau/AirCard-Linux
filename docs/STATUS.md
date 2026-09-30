@@ -1,7 +1,7 @@
 # Verification status
 
 Current delivery scope: Wallet card artwork only, including preview, device/card selection,
-private backups, restore and interrupted-operation recovery. No lock-screen customization,
+direct extraction, private backups, restore and interrupted-operation recovery. No lock-screen customization,
 Books management or standalone protocol experiments are exposed as product functions.
 
 ## Hardware
@@ -29,6 +29,27 @@ One authorized, paired iPhone on iOS 27.0, connected over USB to Manjaro x86_64.
 The Wallet-only release meets the local USB acceptance scope. Wi-Fi, additional cards/OS
 versions and hosted CI outcomes are outside this verified boundary.
 Hardware reports and private fixtures stay in ignored local directories and are not shipped.
+
+## Artwork extraction verification (2026-09-30)
+
+The owner selected a card on the paired USB iPhone running iOS 27.0.1 and closed Wallet
+and Books before extraction. `card-extract` exported the available
+`cardBackgroundCombined@2x.png` into a private ZIP. ZIP CRC checks passed and the extracted
+bytes matched the captured device original exactly. Original artwork restoration passed
+both move and readback verification; catalog restoration and staging cleanup succeeded.
+No replacement artwork, cache invalidation or standalone backup was produced. The recovery
+directory was removed after success. Visual appearance was not separately reaccepted.
+
+The first attempt exposed a newly generated empty managed-sync lock that the restoration
+allowlist did not recognize. The narrow cleanup fix passed a separate recovery on the same
+device. Tests ensure nonempty/changed locks and managed user content still cause a conflict.
+A candidate without supported resources then returned `card_artwork_not_found` and cleaned
+up successfully; rescanning the previously customized card produced the successful ZIP above.
+
+All 96 Rust tests, formatting, workspace Clippy with warnings denied and release build passed.
+Nineteen native GUI smoke views passed, including extraction without a replacement image,
+its confirmation dialog, light/dark themes and compact layouts. Wi-Fi extraction and abrupt
+interruption during extraction remain unverified on hardware.
 
 ## Built-in token verification (2026-09-24)
 

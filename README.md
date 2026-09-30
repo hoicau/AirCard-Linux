@@ -49,6 +49,14 @@ glibc, TLS/graphics libraries and the usbmuxd service; the archive is not fully 
 5. Click **Apply Artwork…**, review the target card and device, then confirm. Reopen Wallet
    after completion.
 
+To save the selected card's **current** artwork, click **Extract artwork…** below the card
+selector, choose a new ZIP filename and confirm. No replacement image or previous Apply
+backup is needed. The ZIP contains the available `cardBackgroundCombined@3x.png`,
+`cardBackgroundCombined@2x.png` and `cardBackgroundCombined.pdf` files with their original
+bytes. Existing output files are preserved. Keep Wallet and Books closed: extraction briefly
+moves the artwork to read it, restores and verifies it, then saves the ZIP. Display caches
+are untouched. An interrupted extraction uses the same **Recover** action in Advanced Options.
+
 Detection reads Wallet activity from iPhone logs; it does not enumerate every stored card.
 If no identifier appears, return to Wallet's card list, click **Scan**, wait
 for the prompt and reopen the intended card. If no logs arrive, unlock/reconnect over USB
@@ -116,6 +124,10 @@ mkdir -p .local
   --backup .local/card-original.json --journal .local/card-transaction \
   --grappa-token .local/token.bin --transport usb --timeout 25
 
+./target/release/aircard card-extract --card-hash '<HASH>' \
+  --output .local/card-artwork.zip --journal .local/extract-transaction \
+  --grappa-token .local/token.bin --transport usb --timeout 25 --apply
+
 ./target/release/aircard card-restore .local/card-original.json \
   --journal .local/restore-transaction --grappa-token .local/token.bin \
   --transport usb --timeout 25 --apply
@@ -126,7 +138,7 @@ mkdir -p .local
 
 `prepare-card` can additionally export a resource ZIP with `--output wallet.zip`.
 `probe` checks the selected paired device's AFC connection without writing.
-All card-changing commands default to dry-run and require `--apply`.
+All card transactions, including extraction's temporary moves, default to dry-run and require `--apply`.
 
 ## Compatibility and limits
 
